@@ -11,6 +11,11 @@ get_val() {
     grep -i "^[[:space:]]*$1[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n'
 }
 
+clean_num() {
+    # Извлечение первого числа / нижней границы диапазона: '25-35' -> '25'
+    echo "$1" | sed -e 's/-.*//' | tr -cd '0-9'
+}
+
 get_wg_cmd() {
     if command -v awg >/dev/null 2>&1 || [ -x /usr/bin/awg ]; then
         echo "awg"
@@ -154,6 +159,8 @@ case "$ACTION" in
         HANDSHAKE="Никогда"
         RX="0 B"
         TX="0 B"
+        RX_B=0
+        TX_B=0
         ENDPOINT="-"
 
         if [ "$HAS_TOOLS" -eq 1 ] && ip link show awg0 >/dev/null 2>&1; then
@@ -165,6 +172,8 @@ case "$ACTION" in
                 HS_TS=$(echo "$DUMP" | awk '{print $5}')
                 RX_B=$(echo "$DUMP" | awk '{print $6}')
                 TX_B=$(echo "$DUMP" | awk '{print $7}')
+                [ -z "$RX_B" ] && RX_B=0
+                [ -z "$TX_B" ] && TX_B=0
                 ENDPOINT="$EP"
                 if [ "$HS_TS" != "0" ] && [ -n "$HS_TS" ]; then
                     NOW=$(date +%s)
@@ -184,8 +193,8 @@ case "$ACTION" in
             fi
         fi
 
-        printf '{"pkg_installed":%d,"missing_pkgs":"%s","has_curl":%d,"if_exists":%d,"if_disabled":%d,"wg_up":%d,"endpoint":"%s","handshake":"%s","rx":"%s","tx":"%s","backup_time":"%s","version":"%s","target":"%s","subtarget":"%s","arch":"%s"}\n' \
-            "$PKG_OK" "$MISSING" "$HAS_CURL" "$IF_EXISTS" "$IF_DISABLED" "$WG_UP" "$ENDPOINT" "$HANDSHAKE" "$RX" "$TX" "$BKP_TIME" "$VERSION" "$TARGET" "$SUBTARGET" "$PKGARCH"
+        printf '{"pkg_installed":%d,"missing_pkgs":"%s","has_curl":%d,"if_exists":%d,"if_disabled":%d,"wg_up":%d,"endpoint":"%s","handshake":"%s","rx":"%s","tx":"%s","rx_bytes":%s,"tx_bytes":%s,"backup_time":"%s","version":"%s","target":"%s","subtarget":"%s","arch":"%s"}\n' \
+            "$PKG_OK" "$MISSING" "$HAS_CURL" "$IF_EXISTS" "$IF_DISABLED" "$WG_UP" "$ENDPOINT" "$HANDSHAKE" "$RX" "$TX" "${RX_B:-0}" "${TX_B:-0}" "$BKP_TIME" "$VERSION" "$TARGET" "$SUBTARGET" "$PKGARCH"
         ;;
 
     start_install)
@@ -435,19 +444,61 @@ case "$ACTION" in
         H2=$(get_val "H2")
         H3=$(get_val "H3")
         H4=$(get_val "H4")
+        S3=$(get_val "S3")
+        S4=$(get_val "S4")
+        HPK=$(get_val "HeaderProtectionKey")
+        CPA=$(get_val "ContentPaddingAddition")
         PUB_KEY=$(get_val "PublicKey")
         PSK=$(get_val "PresharedKey")
         MTU=$(get_val "MTU")
+        LISTEN_PORT=$(get_val "ListenPort")
+        FWMARK=$(get_val "FwMark")
+
+        # Fallback: автоматическое извлечение параметров из комментария Keenetic CLI, если они отсутствуют в ключах:
+        # Пример: "# Keenetic: interface Wireguard0 wireguard asc 5 10 80 964 230 1 2 3 4"
+        if [ -z "$JC" ] || [ -z "$S1" ]; then
+            KEENETIC_LINE=$(grep -i -E "wireguard[[:space:]]+asc[[:space:]]+[0-9]+" "$CONF" 2>/dev/null | head -n 1)
+            if [ -n "$KEENETIC_LINE" ]; then
+                ASC_PARTS=$(echo "$KEENETIC_LINE" | sed -e 's/.*wireguard[[:space:]]\+asc[[:space:]]\+//I')
+                set -- $ASC_PARTS
+                [ -z "$JC" ] && [ -n "$1" ] && JC="$1"
+                [ -z "$JMIN" ] && [ -n "$2" ] && JMIN="$2"
+                [ -z "$JMAX" ] && [ -n "$3" ] && JMAX="$3"
+                [ -z "$S1" ] && [ -n "$4" ] && S1="$4"
+                [ -z "$S2" ] && [ -n "$5" ] && S2="$5"
+                [ -z "$H1" ] && [ -n "$6" ] && H1="$6"
+                [ -z "$H2" ] && [ -n "$7" ] && H2="$7"
+                [ -z "$H3" ] && [ -n "$8" ] && H3="$8"
+                [ -z "$H4" ] && [ -n "$9" ] && H4="$9"
+            fi
+        fi
+
+        # Нормализация чисел и диапазонов (например '25-35' -> '25')
+        [ -n "$JC" ] && JC=$(clean_num "$JC")
+        [ -n "$JMIN" ] && JMIN=$(clean_num "$JMIN")
+        [ -n "$JMAX" ] && JMAX=$(clean_num "$JMAX")
+        [ -n "$S1" ] && S1=$(clean_num "$S1")
+        [ -n "$S2" ] && S2=$(clean_num "$S2")
+        [ -n "$S3" ] && S3=$(clean_num "$S3")
+        [ -n "$S4" ] && S4=$(clean_num "$S4")
+        [ -n "$H1" ] && H1=$(clean_num "$H1")
+        [ -n "$H2" ] && H2=$(clean_num "$H2")
+        [ -n "$H3" ] && H3=$(clean_num "$H3")
+        [ -n "$H4" ] && H4=$(clean_num "$H4")
+        [ -n "$MTU" ] && MTU=$(clean_num "$MTU")
+        [ -n "$LISTEN_PORT" ] && LISTEN_PORT=$(clean_num "$LISTEN_PORT")
 
         ENDPOINT=$(get_val "Endpoint")
         EP_PORT="${ENDPOINT##*:}"
         EP_HOST="${ENDPOINT%:*}"
         EP_HOST=$(echo "$EP_HOST" | tr -d '[]')
+        EP_PORT=$(clean_num "$EP_PORT")
 
         [ -z "$PRIV_KEY" ] && { echo "[!] Ошибка: В секции [Interface] отсутствует PrivateKey"; exit 1; }
         [ -z "$PUB_KEY" ] && { echo "[!] Ошибка: В секции [Peer] отсутствует PublicKey"; exit 1; }
         [ -z "$EP_HOST" ] && { echo "[!] Ошибка: В секции [Peer] отсутствует Endpoint"; exit 1; }
 
+        # Создаем свежую секцию network.awg0, удаляя старые параметры обфускации
         uci -q delete network.awg0
         uci set network.awg0=interface
         uci set network.awg0.proto='amneziawg'
@@ -456,6 +507,8 @@ case "$ACTION" in
         uci set network.awg0.ip4table='100'
         uci set network.awg0.disabled='0'
         [ -n "$MTU" ] && uci set network.awg0.mtu="$MTU"
+        [ -n "$LISTEN_PORT" ] && uci set network.awg0.listen_port="$LISTEN_PORT"
+        [ -n "$FWMARK" ] && uci set network.awg0.fwmark="$FWMARK"
 
         # Настройка IP адресов интерфейса
         RAW_ADDR=$(grep -i "^[[:space:]]*Address[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n')
@@ -475,7 +528,7 @@ case "$ACTION" in
         done
         IFS="$OLD_IFS"
 
-        # Параметры маскировки AmneziaWG (v1/v2)
+        # Параметры маскировки AmneziaWG (v1/v2 / Keenetic ASC)
         [ -n "$JC" ] && uci set network.awg0.awg_jc="$JC"
         [ -n "$JMIN" ] && uci set network.awg0.awg_jmin="$JMIN"
         [ -n "$JMAX" ] && uci set network.awg0.awg_jmax="$JMAX"
@@ -487,12 +540,10 @@ case "$ACTION" in
         [ -n "$H4" ] && uci set network.awg0.awg_h4="$H4"
 
         # Поддержка расширенных параметров (AmneziaWG 3.1)
-        S3=$(get_val "S3")
-        S4=$(get_val "S4")
-        HPK=$(get_val "HeaderProtectionKey")
         [ -n "$S3" ] && uci set network.awg0.awg_s3="$S3"
         [ -n "$S4" ] && uci set network.awg0.awg_s4="$S4"
         [ -n "$HPK" ] && uci set network.awg0.awg_header_protection_key="$HPK"
+        [ -n "$CPA" ] && uci set network.awg0.awg_content_padding_addition="$CPA"
 
         # Настройка пира AmneziaWG
         while uci -q delete network.@amneziawg_awg0[0]; do :; done
@@ -504,10 +555,26 @@ case "$ACTION" in
         [ -n "$PSK" ] && uci set network.$PEER.preshared_key="$PSK"
         uci set network.$PEER.endpoint_host="$EP_HOST"
         uci set network.$PEER.endpoint_port="$EP_PORT"
-        uci set network.$PEER.persistent_keepalive='25'
+
+        RAW_PKA=$(get_val "PersistentKeepalive")
+        PKA=$(clean_num "$RAW_PKA")
+        [ -z "$PKA" ] && PKA="25"
+        uci set network.$PEER.persistent_keepalive="$PKA"
         uci set network.$PEER.route_allowed_ips='1'
+
+        RAW_ALLOWED=$(grep -i "^[[:space:]]*AllowedIPs[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d '\r\n')
         uci -q delete network.$PEER.allowed_ips
-        uci add_list network.$PEER.allowed_ips='0.0.0.0/0'
+        if [ -n "$RAW_ALLOWED" ]; then
+            OLD_IFS="$IFS"
+            IFS=','
+            for AIP in $RAW_ALLOWED; do
+                AIP=$(echo "$AIP" | tr -d ' ')
+                [ -n "$AIP" ] && uci add_list network.$PEER.allowed_ips="$AIP"
+            done
+            IFS="$OLD_IFS"
+        else
+            uci add_list network.$PEER.allowed_ips='0.0.0.0/0'
+        fi
 
         # DNS из конфига (если задан)
         RAW_DNS=$(grep -i "^[[:space:]]*DNS[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n')

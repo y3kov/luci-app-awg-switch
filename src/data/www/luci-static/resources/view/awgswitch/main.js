@@ -37,6 +37,7 @@ return view.extend({
                     var elHs = document.getElementById('awg_live_hs');
                     var elTraffic = document.getElementById('awg_live_traffic');
                     var elEp = document.getElementById('awg_live_ep');
+                    var elAlert = document.getElementById('awg_waiting_alert');
 
                     if (elPkg) {
                         elPkg.innerHTML = s.pkg_installed
@@ -44,9 +45,16 @@ return view.extend({
                             : '<span style="color:#d9534f;font-weight:bold;">⚠️ Отсутствуют: ' + (s.missing_pkgs || 'модули AmneziaWG') + '</span>';
                     }
                     if (elState) {
-                        elState.innerHTML = s.wg_up
-                            ? '<span style="color:#2ea043;font-weight:bold;">● АКТИВЕН (UP)</span>'
-                            : '<span style="color:#d9534f;font-weight:bold;">○ ОСТАНОВЛЕН (DOWN)</span>';
+                        if (!s.wg_up) {
+                            elState.innerHTML = '<span style="color:#888;font-weight:bold;">○ ОСТАНОВЛЕН (DOWN)</span>';
+                        } else if (s.handshake === 'Никогда' || s.rx === '0 B' || s.rx_bytes === 0) {
+                            elState.innerHTML = '<span style="color:#e6a23c;font-weight:bold;" title="Туннель поднят локально, но сервер не ответил на handshake">⚠️ ОЖИДАНИЕ СЕРВЕРА (0 B)</span>';
+                        } else {
+                            elState.innerHTML = '<span style="color:#2ea043;font-weight:bold;">● ПОДКЛЮЧЕН (ONLINE)</span>';
+                        }
+                    }
+                    if (elAlert) {
+                        elAlert.style.display = (s.wg_up && (s.handshake === 'Никогда' || s.rx === '0 B' || s.rx_bytes === 0)) ? 'block' : 'none';
                     }
                     if (elHs) elHs.textContent = s.handshake || '-';
                     if (elTraffic) elTraffic.textContent = '↓ ' + (s.rx || '0 B') + ' / ↑ ' + (s.tx || '0 B');
@@ -146,9 +154,11 @@ return view.extend({
                         E('div', { 'style': 'padding:10px; border:1px solid #444; border-radius:6px;' }, [
                             E('div', { 'style': 'font-size:11px; color:#888;' }, 'СОСТОЯНИЕ ТУННЕЛЯ (awg0)'),
                             E('div', { 'id': 'awg_live_state', 'style': 'font-size:14px; margin-top:4px;' },
-                                st.wg_up
-                                    ? E('span', { 'style': 'color:#2ea043; font-weight:bold;' }, '● АКТИВЕН (UP)')
-                                    : E('span', { 'style': 'color:#d9534f; font-weight:bold;' }, '○ ОСТАНОВЛЕН (DOWN)'))
+                                (!st.wg_up)
+                                    ? E('span', { 'style': 'color:#888; font-weight:bold;' }, '○ ОСТАНОВЛЕН (DOWN)')
+                                    : ((st.handshake === 'Никогда' || st.rx === '0 B' || st.rx_bytes === 0)
+                                        ? E('span', { 'style': 'color:#e6a23c; font-weight:bold;', 'title': 'Туннель запущен локально, но сервер не ответил на handshake' }, '⚠️ ОЖИДАНИЕ СЕРВЕРА (0 B)')
+                                        : E('span', { 'style': 'color:#2ea043; font-weight:bold;' }, '● ПОДКЛЮЧЕН (ONLINE)')))
                         ]),
                         E('div', { 'style': 'padding:10px; border:1px solid #444; border-radius:6px;' }, [
                             E('div', { 'style': 'font-size:11px; color:#888;' }, 'ПОСЛЕДНИЙ HANDSHAKE'),
@@ -178,6 +188,19 @@ return view.extend({
                             'class': 'btn cbi-button cbi-button-save',
                             'click': ui.createHandlerFn(self, 'handleFixDns')
                         }, '🛡 Применить безопасные DNS (Cloudflare 1.1.1.1)') : E('span')
+                    ]),
+                    E('div', {
+                        'id': 'awg_waiting_alert',
+                        'style': 'margin-top:14px; padding:12px; background:#2a2111; border:1px solid #e6a23c; border-radius:6px; font-size:12px; line-height:1.6; display:' + ((st.wg_up && (st.handshake === 'Никогда' || st.rx === '0 B' || st.rx_bytes === 0)) ? 'block' : 'none') + ';'
+                    }, [
+                        E('strong', { 'style': 'color:#e6a23c; font-size:13px;' }, '⚠️ Внимание: Интерфейс awg0 запущен, но входящий трафик от сервера равен 0 B (рукопожатие не завершено)'),
+                        E('p', { 'style': 'margin:6px 0;' },
+                            'Пакеты отправляются, но сервер пока не ответил. Возможные причины:'),
+                        E('ul', { 'style': 'margin:6px 0 6px 20px;' }, [
+                            E('li', {}, 'Конфиг активен на другом устройстве (телефоне или ПК). В WireGuard нельзя использовать одну сессию на двух устройствах одновременно.'),
+                            E('li', {}, 'Для конфигураций Amnezia Premium: если сервер настроен с HeaderProtectionKey и CPS (AmneziaWG 3.1), он отклоняет handshake без защиты заголовков.'),
+                            E('li', {}, 'Провайдер или ТСПУ блокирует UDP-порт или адрес сервера.')
+                        ])
                     ]),
                     !st.pkg_installed ? (function() {
                         var ver = st.version || '23.05.2';
