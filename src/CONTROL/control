@@ -1,0 +1,8 @@
+Package: luci-app-awg-switch
+Version: 2.0.0-1
+Depends: libc
+Section: luci
+Architecture: all
+Installed-Size: 20480
+Maintainer: Custom OpenWrt Builder
+Description: AmneziaWG Switch Pro for OpenWrt 23.05 (per-device routing, live monitor, backup/restore, auto-installer of missing modules, diagnostics)

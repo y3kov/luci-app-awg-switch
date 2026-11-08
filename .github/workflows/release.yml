@@ -1,0 +1,32 @@
+name: Build and Release IPK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build IPK package
+        run: |
+          python build_ipk.py
+
+      - name: Create Release and Upload IPK
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: luci-app-awg-switch_*.ipk
+          generate_release_notes: true
+          draft: false
+          prerelease: false

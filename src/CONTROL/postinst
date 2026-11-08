@@ -1,0 +1,16 @@
+#!/bin/sh
+[ "${IPKG_INSTROOT}" != "" ] && exit 0
+
+mkdir -p /etc/awgswitch/backup
+if [ ! -f /etc/awgswitch/backup/network.orig ]; then
+    cp /etc/config/network /etc/awgswitch/backup/network.orig
+    cp /etc/config/firewall /etc/awgswitch/backup/firewall.orig
+    cp /etc/config/dhcp /etc/awgswitch/backup/dhcp.orig
+    date "+%Y-%m-%d %H:%M:%S" > /etc/awgswitch/backup/timestamp
+fi
+
+chmod +x /usr/libexec/awgswitch/ctl.sh
+modprobe amneziawg >/dev/null 2>&1 || true
+rm -rf /tmp/luci-*
+/etc/init.d/rpcd reload >/dev/null 2>&1
+exit 0

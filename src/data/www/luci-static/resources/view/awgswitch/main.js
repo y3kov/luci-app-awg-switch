@@ -1,0 +1,645 @@
+'use strict';
+'require view';
+'require fs';
+'require uci';
+'require ui';
+'require poll';
+
+return view.extend({
+    _installTimer: null,
+
+    load: function() {
+        return Promise.all([
+            uci.load('network'),
+            uci.load('dhcp'),
+            fs.trimmed('/tmp/dhcp.leases').catch(function() { return ''; }),
+            fs.read('/etc/awgswitch/current.conf').catch(function() { return ''; }),
+            fs.exec('/usr/libexec/awgswitch/ctl.sh', ['status']).then(function(r) {
+                try { return JSON.parse(r.stdout); } catch(e) { return {}; }
+            }),
+            fs.read('/proc/net/arp').catch(function() { return ''; })
+        ]);
+    },
+
+    render: function(data) {
+        var leasesRaw = data[2] || '';
+        var currentConf = data[3] || '';
+        var st = data[4] || {};
+        var arpRaw = data[5] || '';
+        var self = this;
+
+        poll.add(function() {
+            return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['status']).then(function(r) {
+                try {
+                    var s = JSON.parse(r.stdout);
+                    var elPkg = document.getElementById('awg_live_pkg');
+                    var elState = document.getElementById('awg_live_state');
+                    var elHs = document.getElementById('awg_live_hs');
+                    var elTraffic = document.getElementById('awg_live_traffic');
+                    var elEp = document.getElementById('awg_live_ep');
+
+                    if (elPkg) {
+                        elPkg.innerHTML = s.pkg_installed
+                            ? '<span style="color:#2ea043;font-weight:bold;">✅ Все модули активны</span>'
+                            : '<span style="color:#d9534f;font-weight:bold;">⚠️ Отсутствуют: ' + (s.missing_pkgs || 'модули AmneziaWG') + '</span>';
+                    }
+                    if (elState) {
+                        elState.innerHTML = s.wg_up
+                            ? '<span style="color:#2ea043;font-weight:bold;">● АКТИВЕН (UP)</span>'
+                            : '<span style="color:#d9534f;font-weight:bold;">○ ОСТАНОВЛЕН (DOWN)</span>';
+                    }
+                    if (elHs) elHs.textContent = s.handshake || '-';
+                    if (elTraffic) elTraffic.textContent = '↓ ' + (s.rx || '0 B') + ' / ↑ ' + (s.tx || '0 B');
+                    if (elEp) elEp.textContent = s.endpoint || '-';
+                } catch(e) {}
+            });
+        }, 3);
+
+        var devices = {};
+
+        // 1. Устройства из DHCP Leases
+        leasesRaw.split('\n').forEach(function(line) {
+            var p = line.trim().split(/\s+/);
+            if (p.length >= 4) {
+                devices[p[2]] = { ip: p[2], mac: p[1].toUpperCase(), name: (p[3] !== '*') ? p[3] : 'Устройство (' + p[2] + ')' };
+            }
+        });
+
+        // 2. Статические хосты из DHCP
+        uci.sections('dhcp', 'host', function(s) {
+            if (s.ip) {
+                devices[s.ip] = {
+                    ip: s.ip,
+                    mac: s.mac ? (Array.isArray(s.mac) ? s.mac[0] : s.mac).toUpperCase() : '-',
+                    name: s.name || (devices[s.ip] ? devices[s.ip].name : 'Static (' + s.ip + ')')
+                };
+            }
+        });
+
+        // 3. Активные устройства из ARP
+        arpRaw.split('\n').forEach(function(line) {
+            var p = line.trim().split(/\s+/);
+            if (p.length >= 6 && p[0].indexOf('.') !== -1 && p[3] !== '00:00:00:00:00:00') {
+                var arpIp = p[0];
+                var arpMac = p[3].toUpperCase();
+                if (!devices[arpIp]) {
+                    devices[arpIp] = { ip: arpIp, mac: arpMac, name: 'LAN-устройство (' + arpIp + ')' };
+                } else if (devices[arpIp].mac === '-') {
+                    devices[arpIp].mac = arpMac;
+                }
+            }
+        });
+
+        var rules = uci.sections('network', 'rule');
+        var vpnEnabledMap = {};
+        rules.forEach(function(r) {
+            if (r.lookup == '100' && r.src && r.enabled !== '0') {
+                var ipOnly = r.src.split('/')[0];
+                vpnEnabledMap[ipOnly] = r['.name'];
+            }
+        });
+
+        // 4. Добавляем устройства, для которых уже есть правила
+        Object.keys(vpnEnabledMap).forEach(function(ip) {
+            if (!devices[ip]) {
+                devices[ip] = { ip: ip, mac: '-', name: 'Пользовательский IP (' + ip + ')' };
+            }
+        });
+
+        this._currentDevices = devices;
+
+        var rows = Object.keys(devices).sort().map(function(ip) {
+            var dev = devices[ip];
+            var isOn = !!vpnEnabledMap[ip];
+            return E('tr', { 'class': 'tr' }, [
+                E('td', { 'class': 'td' }, E('strong', {}, dev.name)),
+                E('td', { 'class': 'td' }, dev.ip),
+                E('td', { 'class': 'td' }, dev.mac),
+                E('td', { 'class': 'td' }, isOn
+                    ? E('span', { 'style': 'color:#2ea043; font-weight:bold;' }, '● В туннеле VPN')
+                    : E('span', { 'style': 'color:#888;' }, '○ Прямой интернет')),
+                E('td', { 'class': 'td' }, E('button', {
+                    'class': isOn ? 'btn cbi-button cbi-button-reset' : 'btn cbi-button cbi-button-apply',
+                    'click': ui.createHandlerFn(self, 'handleToggleDevice', ip, isOn)
+                }, isOn ? 'Выключить VPN' : 'Включить VPN'))
+            ]);
+        });
+
+        var isMasterOff = (st.if_disabled === 1);
+
+        return E('div', { 'class': 'cbi-map' }, [
+            E('h2', {}, 'AmneziaWG Switch Pro — Управление, Мониторинг и Диагностика'),
+
+            E('div', { 'class': 'cbi-section' }, [
+                E('h3', {}, '1. Статус-монитор в реальном времени (обновление каждые 3 сек)'),
+                E('div', { 'class': 'cbi-section-node', 'style': 'padding:12px;' }, [
+                    E('div', { 'style': 'display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:15px;' }, [
+                        E('div', { 'style': 'padding:10px; border:1px solid #444; border-radius:6px;' }, [
+                            E('div', { 'style': 'font-size:11px; color:#888;' }, 'МОДУЛИ AMNEZIAWG'),
+                            E('div', { 'id': 'awg_live_pkg', 'style': 'font-size:14px; margin-top:4px; font-weight:bold;' },
+                                st.pkg_installed
+                                    ? E('span', { 'style': 'color:#2ea043;' }, '✅ Все модули активны')
+                                    : E('span', { 'style': 'color:#d9534f;' }, '⚠️ Отсутствуют: ' + (st.missing_pkgs || 'модули AmneziaWG')))
+                        ]),
+                        E('div', { 'style': 'padding:10px; border:1px solid #444; border-radius:6px;' }, [
+                            E('div', { 'style': 'font-size:11px; color:#888;' }, 'СОСТОЯНИЕ ТУННЕЛЯ (awg0)'),
+                            E('div', { 'id': 'awg_live_state', 'style': 'font-size:14px; margin-top:4px;' },
+                                st.wg_up
+                                    ? E('span', { 'style': 'color:#2ea043; font-weight:bold;' }, '● АКТИВЕН (UP)')
+                                    : E('span', { 'style': 'color:#d9534f; font-weight:bold;' }, '○ ОСТАНОВЛЕН (DOWN)'))
+                        ]),
+                        E('div', { 'style': 'padding:10px; border:1px solid #444; border-radius:6px;' }, [
+                            E('div', { 'style': 'font-size:11px; color:#888;' }, 'ПОСЛЕДНИЙ HANDSHAKE'),
+                            E('div', { 'id': 'awg_live_hs', 'style': 'font-size:14px; margin-top:4px; font-weight:bold;' }, st.handshake || '-')
+                        ]),
+                        E('div', { 'style': 'padding:10px; border:1px solid #444; border-radius:6px;' }, [
+                            E('div', { 'style': 'font-size:11px; color:#888;' }, 'ТРАФИК ТУННЕЛЯ (RX / TX)'),
+                            E('div', { 'id': 'awg_live_traffic', 'style': 'font-size:14px; margin-top:4px; font-weight:bold;' },
+                                '↓ ' + (st.rx || '0 B') + ' / ↑ ' + (st.tx || '0 B'))
+                        ]),
+                        E('div', { 'style': 'padding:10px; border:1px solid #444; border-radius:6px;' }, [
+                            E('div', { 'style': 'font-size:11px; color:#888;' }, 'ENDPOINT СЕРВЕРА'),
+                            E('div', { 'id': 'awg_live_ep', 'style': 'font-size:14px; margin-top:4px;' }, st.endpoint || '-')
+                        ])
+                    ]),
+                    E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; align-items:center;' }, [
+                        E('button', {
+                            'class': isMasterOff ? 'btn cbi-button cbi-button-apply' : 'btn cbi-button cbi-button-reset',
+                            'click': ui.createHandlerFn(self, 'handleMasterToggle', isMasterOff ? '0' : '1')
+                        }, isMasterOff ? '▶ Включить туннель AmneziaWG' : '⏸ Отключить туннель (все устройства напрямую)'),
+                        !st.pkg_installed ? E('button', {
+                            'id': 'awg_btn_install',
+                            'class': 'btn cbi-button cbi-button-action',
+                            'click': ui.createHandlerFn(self, 'handleInstallPkg')
+                        }, '⬇ Установить недостающие модули автоматически') : E('span'),
+                        !st.pkg_installed ? E('button', {
+                            'class': 'btn cbi-button cbi-button-save',
+                            'click': ui.createHandlerFn(self, 'handleFixDns')
+                        }, '🛡 Применить безопасные DNS (Cloudflare 1.1.1.1)') : E('span')
+                    ]),
+                    !st.pkg_installed ? (function() {
+                        var ver = st.version || '23.05.2';
+                        var arch = st.arch || 'mipsel_24kc';
+                        var tgt = st.target || 'ramips';
+                        var subtgt = st.subtarget || 'mt7621';
+                        var pfix = '_v' + ver + '_' + arch + '_' + tgt + '_' + subtgt + '.ipk';
+                        var toolsUrl = 'https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v' + ver + '/amneziawg-tools' + pfix;
+                        var luciPkg = (st.missing_pkgs && st.missing_pkgs.indexOf('luci-proto') !== -1) ? 'luci-proto-amneziawg' : 'luci-app-amneziawg';
+                        var luciUrl = 'https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v' + ver + '/' + luciPkg + pfix;
+
+                        return E('div', { 'style': 'margin-top:14px; padding:12px; background:#1e1e1e; border:1px solid #444; border-radius:6px; font-size:12px; line-height:1.6;' }, [
+                            E('strong', { 'style': 'color:#e6a23c; font-size:13px;' }, '⚠️ Не удается скачать с GitHub автоматически (ошибка 504 / блокировка)?'),
+                            E('p', { 'style': 'margin:6px 0;' }, [
+                                'Если провайдер блокирует GitHub релизы, скачайте необходимые пакеты прямо на ваш компьютер в один клик:'
+                            ]),
+                            E('ul', { 'style': 'margin:6px 0 10px 20px;' }, [
+                                E('li', {}, [
+                                    E('a', { 'href': toolsUrl, 'target': '_blank', 'class': 'cbi-button-link', 'style': 'font-weight:bold; color:#58a6ff;' },
+                                        '⬇ Скачать amneziawg-tools' + pfix)
+                                ]),
+                                E('li', {}, [
+                                    E('a', { 'href': luciUrl, 'target': '_blank', 'class': 'cbi-button-link', 'style': 'font-weight:bold; color:#58a6ff;' },
+                                        '⬇ Скачать ' + luciPkg + pfix)
+                                ])
+                            ]),
+                            E('div', { 'style': 'margin-top:10px; padding-top:10px; border-top:1px dashed #444;' }, [
+                                E('strong', {}, '📁 Загрузить скачанный файл (.ipk) прямо через браузер:'),
+                                E('div', { 'style': 'display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap;' }, [
+                                    E('input', {
+                                        'type': 'file',
+                                        'id': 'awg_upload_input',
+                                        'accept': '.ipk',
+                                        'class': 'cbi-input-file'
+                                    }),
+                                    E('button', {
+                                        'id': 'awg_btn_upload',
+                                        'class': 'btn cbi-button cbi-button-apply',
+                                        'click': ui.createHandlerFn(self, 'handleUploadIpk')
+                                    }, '📤 Загрузить и установить на роутер')
+                                ]),
+                                E('div', { 'style': 'font-size:11px; color:#888; margin-top:6px;' },
+                                    'Либо вы можете загрузить пакет через стандартное меню OpenWrt: «Система → Программное обеспечение → Загрузить пакет».')
+                            ])
+                        ]);
+                    })() : E('span')
+                ])
+            ]),
+
+            E('div', { 'class': 'cbi-section' }, [
+                E('h3', {}, '2. Переключение устройств в VPN одной кнопкой'),
+                E('div', { 'class': 'cbi-section-node', 'style': 'padding:10px 12px; margin-bottom:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;' }, [
+                    E('div', { 'style': 'display:flex; gap:8px; flex-wrap:wrap;' }, [
+                        E('button', { 'class': 'btn cbi-button cbi-button-apply', 'click': ui.createHandlerFn(self, 'handleToggleAll', true) }, '🚀 Направить ВСЕ устройства в VPN'),
+                        E('button', { 'class': 'btn cbi-button cbi-button-reset', 'click': ui.createHandlerFn(self, 'handleToggleAll', false) }, '⏹ Снять ВСЕ устройства с VPN')
+                    ]),
+                    E('div', { 'style': 'display:flex; gap:8px; align-items:center;' }, [
+                        E('input', {
+                            'id': 'awg_custom_ip',
+                            'type': 'text',
+                            'class': 'cbi-input-text',
+                            'style': 'max-width:180px;',
+                            'placeholder': '192.168.1.55'
+                        }),
+                        E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(self, 'handleAddCustomIp') }, '➕ Добавить IP')
+                    ])
+                ]),
+                E('table', { 'class': 'table' }, [
+                    E('tr', { 'class': 'tr table-titles' }, [
+                        E('th', { 'class': 'th' }, 'Устройство'),
+                        E('th', { 'class': 'th' }, 'IP-адрес'),
+                        E('th', { 'class': 'th' }, 'MAC-адрес'),
+                        E('th', { 'class': 'th' }, 'Текущий режим'),
+                        E('th', { 'class': 'th' }, 'Управление')
+                    ])
+                ].concat(rows.length ? rows : [
+                    E('tr', { 'class': 'tr' }, [
+                        E('td', { 'class': 'td', 'colspan': 5, 'style': 'text-align:center; color:#888;' },
+                            'Активных DHCP-клиентов не обнаружено. Подключите устройство к роутеру или добавьте статическую аренду DHCP.')
+                    ])
+                ]))
+            ]),
+
+            E('div', { 'class': 'cbi-section' }, [
+                E('h3', {}, '3. Диагностика: IP, DNS и проверка доступности сервисов (Anthropic, OpenAI, YouTube)'),
+                E('div', { 'class': 'cbi-section-node', 'style': 'padding:12px;' }, [
+                    E('div', { 'style': 'display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;' }, [
+                        E('button', { 'class': 'btn cbi-button cbi-button-apply', 'click': ui.createHandlerFn(self, 'handleRunTest', 'ipinfo', '') },
+                            '🌐 Сравнить IP / Гео / ASN (WAN vs VPN) + DNS'),
+                        E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(self, 'handleRunTest', 'anthropic', '') },
+                            '🤖 Тест Anthropic / Claude (Trace & API)'),
+                        E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(self, 'handleRunTest', 'openai', '') },
+                            '🧠 Тест OpenAI / ChatGPT'),
+                        E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(self, 'handleRunTest', 'youtube', '') },
+                            '▶ Тест YouTube & Google Video'),
+                        E('button', { 'class': 'btn cbi-button cbi-button-save', 'click': ui.createHandlerFn(self, 'handleFixDns') },
+                            '🛡 Настроить чистый DNS (1.1.1.1 / 8.8.8.8)')
+                    ]),
+                    E('div', { 'style': 'display:flex; gap:8px; margin-bottom:10px; align-items:center;' }, [
+                        E('input', {
+                            'id': 'awg_custom_domain',
+                            'type': 'text',
+                            'class': 'cbi-input-text',
+                            'style': 'max-width:320px;',
+                            'placeholder': 'Введите домен (напр. claude.ai или rutracker.org)'
+                        }),
+                        E('button', { 'class': 'btn cbi-button cbi-button-save', 'click': ui.createHandlerFn(self, 'handleRunCustomTest') },
+                            '🔍 Проверить домен')
+                    ]),
+                    E('pre', {
+                        'id': 'awg_test_output',
+                        'style': 'background:#111; color:#0f0; padding:12px; border-radius:6px; min-height:120px; font-family:monospace; font-size:12px; white-space:pre-wrap; max-height:360px; overflow-y:auto;'
+                    }, 'Нажмите любую кнопку теста выше или запустите установку модулей...')
+                ])
+            ]),
+
+            E('div', { 'class': 'cbi-section' }, [
+                E('h3', {}, '4. Загрузка / смена конфигурации (.conf)'),
+                E('div', { 'class': 'cbi-section-node', 'style': 'padding:12px;' }, [
+                    E('textarea', {
+                        'id': 'awg_conf_input',
+                        'class': 'cbi-input-textarea',
+                        'style': 'width:100%; height:150px; font-family:monospace; font-size:12px;',
+                        'placeholder': '[Interface]\nPrivateKey = ...\nAddress = ...\n# Параметры AmneziaWG:\nJc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 39\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n\n[Peer]\nPublicKey = ...\nEndpoint = ...'
+                    }, currentConf),
+                    E('div', { 'style': 'margin-top:10px;' }, [
+                        E('button', {
+                            'class': 'btn cbi-button cbi-button-save',
+                            'click': ui.createHandlerFn(self, 'handleSetupConf')
+                        }, '💾 Применить .conf и настроить туннель awg0')
+                    ])
+                ])
+            ]),
+
+            E('div', { 'class': 'cbi-section' }, [
+                E('h3', {}, '5. Управление конфигурацией сети и резервные копии'),
+                E('div', { 'class': 'cbi-section-node', 'style': 'padding:12px;' }, [
+                    E('p', { 'style': 'margin-bottom:12px; color:#ccc;' }, [
+                        'ℹ️ ', E('strong', {}, 'Резервная копия сети: '),
+                        'Плагин автоматически сохраняет снимок файлов network, firewall и dhcp до внесения изменений. ',
+                        'Дата текущего снимка: ', E('strong', { 'style': 'color:#2ea043;' }, st.backup_time || 'Нет')
+                    ]),
+                    E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin-bottom:15px;' }, [
+                        E('button', {
+                            'class': 'btn cbi-button cbi-button-apply',
+                            'click': ui.createHandlerFn(self, 'handleResetRules')
+                        }, '🔄 Сбросить правила VPN (все устройства напрямую)'),
+                        E('button', {
+                            'class': 'btn cbi-button cbi-button-save',
+                            'click': ui.createHandlerFn(self, 'handleBackupNow')
+                        }, '📸 Создать новую точку отката сети')
+                    ]),
+
+                    E('details', { 'style': 'background:#222; border:1px solid #444; border-radius:6px; padding:10px;' }, [
+                        E('summary', { 'style': 'cursor:pointer; font-weight:bold; color:#ff9800;' }, '⚠️ Дополнительно: Откат настроек сети и удаление плагина'),
+                        E('div', { 'style': 'margin-top:12px; font-size:12px; line-height:1.6;' }, [
+                            E('p', {}, 'Используйте эти действия только в случае необходимости вернуть сетевые настройки роутера в исходное состояние.'),
+                            E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin-top:8px;' }, [
+                                E('button', {
+                                    'class': 'btn cbi-button cbi-button-action',
+                                    'click': ui.createHandlerFn(self, 'handleRestoreBackup')
+                                }, '⏪ Восстановить network и firewall из снимка'),
+                                E('button', {
+                                    'class': 'btn cbi-button cbi-button-reset',
+                                    'click': ui.createHandlerFn(self, 'handleUninstall', 'switcher_only')
+                                }, '🗑 Удалить плагин Switcher'),
+                                E('button', {
+                                    'class': 'btn cbi-button cbi-button-negative',
+                                    'click': ui.createHandlerFn(self, 'handleUninstall', 'full_purge')
+                                }, '☢ Полное удаление (Switcher + пакеты AmneziaWG)')
+                            ])
+                        ])
+                    ])
+                ])
+            ])
+        ]);
+    },
+
+    handleInstallPkg: function() {
+        var btn = document.getElementById('awg_btn_install');
+        var out = document.getElementById('awg_test_output');
+        var self = this;
+
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '⏳ Идет установка...';
+        }
+        if (out) {
+            out.textContent = '[ИНФО] Запуск фонового процесса установки пакетов AmneziaWG...\nПожалуйста, подождите, проверяются локальные пакеты и репозитории...';
+            out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        if (this._installTimer) {
+            clearInterval(this._installTimer);
+            this._installTimer = null;
+        }
+
+        var pollLog = function() {
+            fs.exec('/usr/libexec/awgswitch/ctl.sh', ['install_status']).then(function(r) {
+                try {
+                    var st = JSON.parse(r.stdout || '{}');
+                    if (out && st.log) {
+                        out.textContent = st.log;
+                        out.scrollTop = out.scrollHeight;
+                    }
+
+                    if (st.status === 'done') {
+                        if (self._installTimer) {
+                            clearInterval(self._installTimer);
+                            self._installTimer = null;
+                        }
+                        ui.addNotification(null, E('p', 'Все модули AmneziaWG успешно установлены!'), 'info');
+                        if (btn) btn.textContent = '✅ Установка завершена';
+                        setTimeout(function() { window.location.reload(); }, 2000);
+                    } else if (st.status === 'error') {
+                        if (self._installTimer) {
+                            clearInterval(self._installTimer);
+                            self._installTimer = null;
+                        }
+                        ui.addNotification(null, E('p', 'Не удалось автоматически скачать пакеты с GitHub (ошибка 504). См. лог ниже.'), 'danger');
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.textContent = '🔄 Повторить попытку';
+                        }
+                    }
+                } catch(e) {}
+            });
+        };
+
+        // Стартуем опрос каждые 1.5 сек
+        self._installTimer = setInterval(pollLog, 1500);
+
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['start_install']).then(function() {
+            pollLog();
+        }).catch(function(err) {
+            pollLog();
+        });
+    },
+
+    handleResetRules: function() {
+        if (!confirm('Отключить все устройства от VPN и вернуть их на прямой интернет?')) return;
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['reset_rules']).then(function() {
+            window.location.reload();
+        });
+    },
+
+    handleFixDns: function() {
+        var out = document.getElementById('awg_test_output');
+        if (out) {
+            out.textContent = 'Применение безопасных DNS в dnsmasq...';
+            out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['fix_dns']).then(function(r) {
+            if (out) out.textContent = (r.stdout || '') + (r.stderr ? '\n' + r.stderr : '');
+            ui.addNotification(null, E('p', 'Безопасные DNS (1.1.1.1) успешно настроены!'), 'info');
+        });
+    },
+
+    handleUploadIpk: function() {
+        var fileInput = document.getElementById('awg_upload_input');
+        var out = document.getElementById('awg_test_output');
+        var btn = document.getElementById('awg_btn_upload');
+
+        if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+            ui.addNotification(null, E('p', 'Пожалуйста, сначала выберите скачанный файл .ipk на компьютере.'), 'warning');
+            return;
+        }
+
+        var file = fileInput.files[0];
+        if (!file.name.endsWith('.ipk')) {
+            ui.addNotification(null, E('p', 'Выбранный файл должен иметь расширение .ipk!'), 'danger');
+            return;
+        }
+
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '⏳ Передача на роутер...';
+        }
+        if (out) {
+            out.textContent = '[ИНФО] Чтение файла ' + file.name + ' (' + file.size + ' байт)...\nПередача на роутер через браузер...';
+            out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                var bytes = new Uint8Array(e.target.result);
+                var binary = '';
+                var chunkSize = 8192;
+                for (var i = 0; i < bytes.length; i += chunkSize) {
+                    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+                }
+                var b64 = window.btoa(binary);
+
+                if (out) out.textContent += '\nФайл прочитан. Сохранение в буфер роутера...';
+
+                fs.write('/tmp/awg_upload.b64', b64).then(function() {
+                    if (out) out.textContent += '\nПередача завершена! Установка пакета ' + file.name + '...\n';
+                    return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['install_b64', file.name]);
+                }).then(function(res) {
+                    if (out) {
+                        out.textContent += '\n' + (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
+                    }
+                    if (res.code === 0) {
+                        ui.addNotification(null, E('p', 'Пакет ' + file.name + ' успешно установлен!'), 'info');
+                        if (btn) btn.textContent = '✅ Установлено!';
+                        setTimeout(function() { window.location.reload(); }, 2000);
+                    } else {
+                        ui.addNotification(null, E('p', 'Ошибка установки: ' + (res.stderr || res.stdout)), 'danger');
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.textContent = '📤 Загрузить и установить на роутер';
+                        }
+                    }
+                }).catch(function(err) {
+                    if (out) out.textContent += '\n[ОШИБКА]: ' + err.message;
+                    ui.addNotification(null, E('p', 'Ошибка: ' + err.message), 'danger');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = '📤 Загрузить и установить на роутер';
+                    }
+                });
+            } catch(ex) {
+                if (out) out.textContent += '\n[ОШИБКА]: ' + ex.message;
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '📤 Загрузить и установить на роутер';
+                }
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    },
+
+    handleMasterToggle: function(disableFlag) {
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['master_toggle', disableFlag]).then(function() {
+            window.location.reload();
+        });
+    },
+
+    handleRunTest: function(type, domain) {
+        var out = document.getElementById('awg_test_output');
+        if (out) {
+            out.textContent = 'Выполняется проверка (' + type + ')...';
+            out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['test_target', type, domain || '']).then(function(r) {
+            if (out) out.textContent = (r.stdout || '') + (r.stderr ? '\n' + r.stderr : '');
+        });
+    },
+
+    handleRunCustomTest: function() {
+        var dom = document.getElementById('awg_custom_domain').value.trim();
+        if (!dom) return;
+        return this.handleRunTest('custom', dom);
+    },
+
+    handleSetupConf: function() {
+        var text = document.getElementById('awg_conf_input').value;
+        if (!text || text.indexOf('[Interface]') === -1 || text.indexOf('[Peer]') === -1) {
+            ui.addNotification(null, E('p', 'Вставьте корректный конфигурационный файл .conf (должны присутствовать секции [Interface] и [Peer])!'), 'danger');
+            return;
+        }
+        var out = document.getElementById('awg_test_output');
+        if (out) out.textContent = 'Применение новой конфигурации .conf...';
+        return fs.write('/etc/awgswitch/current.conf', text.trim() + '\n').then(function() {
+            return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['apply_conf']);
+        }).then(function(r) {
+            if (r.stdout && r.stdout.indexOf('OK') !== -1) {
+                ui.addNotification(null, E('p', 'Конфигурация успешно применена, интерфейс awg0 запущен!'), 'info');
+                setTimeout(function() { window.location.reload(); }, 1500);
+            } else {
+                if (out) out.textContent = (r.stdout || '') + (r.stderr ? '\n' + r.stderr : '');
+                ui.addNotification(null, E('p', 'Ошибка при применении конфигурации. См. вывод терминала.'), 'danger');
+            }
+        });
+    },
+
+    handleToggleDevice: function(ip, currentlyOn) {
+        var rules = uci.sections('network', 'rule');
+        rules.forEach(function(r) {
+            if (r.lookup == '100' && (r.src === ip + '/32' || r.src === ip)) {
+                uci.remove('network', r['.name']);
+            }
+        });
+        if (!currentlyOn) {
+            var sid = uci.add('network', 'rule');
+            uci.set('network', sid, 'in', 'lan');
+            uci.set('network', sid, 'src', ip + '/32');
+            uci.set('network', sid, 'lookup', '100');
+            uci.set('network', sid, 'priority', '100');
+            uci.set('network', sid, 'enabled', '1');
+            uci.set('network', sid, 'comment', 'awgswitch_' + ip);
+        }
+        return uci.save().then(function() { return uci.apply(); }).then(function() {
+            return fs.exec('/etc/init.d/network', ['reload']);
+        }).then(function() {
+            window.location.reload();
+        });
+    },
+
+    handleToggleAll: function(enable) {
+        var rules = uci.sections('network', 'rule');
+        rules.forEach(function(r) {
+            if (r.lookup == '100') {
+                uci.remove('network', r['.name']);
+            }
+        });
+
+        if (enable && this._currentDevices) {
+            var ips = Object.keys(this._currentDevices);
+            ips.forEach(function(ip) {
+                var sid = uci.add('network', 'rule');
+                uci.set('network', sid, 'in', 'lan');
+                uci.set('network', sid, 'src', ip + '/32');
+                uci.set('network', sid, 'lookup', '100');
+                uci.set('network', sid, 'priority', '100');
+                uci.set('network', sid, 'enabled', '1');
+                uci.set('network', sid, 'comment', 'awgswitch_' + ip);
+            });
+        }
+
+        return uci.save().then(function() { return uci.apply(); }).then(function() {
+            return fs.exec('/etc/init.d/network', ['reload']);
+        }).then(function() {
+            window.location.reload();
+        });
+    },
+
+    handleAddCustomIp: function() {
+        var input = document.getElementById('awg_custom_ip');
+        if (!input) return;
+        var ip = input.value.trim();
+        var ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+        if (!ipRegex.test(ip)) {
+            ui.addNotification(null, E('p', 'Введите корректный IPv4-адрес (например, 192.168.1.55)'), 'danger');
+            return;
+        }
+        return this.handleToggleDevice(ip, false);
+    },
+
+    handleBackupNow: function() {
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['backup_now']).then(function() {
+            window.location.reload();
+        });
+    },
+
+    handleRestoreBackup: function() {
+        if (!confirm('Откатить настройки network, firewall и dhcp к сохраненной копии?')) return;
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['restore_backup']).then(function() {
+            window.location.reload();
+        });
+    },
+
+    handleUninstall: function(mode) {
+        var msg = (mode === 'full_purge')
+            ? 'Удалить плагин, откатить настройки роутера и полностью удалить пакеты AmneziaWG?'
+            : 'Удалить только плагин Switcher и восстановить оригинальные настройки сети?';
+        if (!confirm(msg)) return;
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['uninstall', mode]).then(function() {
+            window.location.href = '/cgi-bin/luci/';
+        });
+    },
+
+    handleSaveApply: null,
+    handleSave: null,
+    handleReset: null
+});

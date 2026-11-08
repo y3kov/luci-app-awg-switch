@@ -1,0 +1,14 @@
+# Compiled and temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Temporary test scripts and logs
+*.log
+*.tmp
+/test_tags.py
+
+# OS generated files
+.DS_Store
+Thumbs.db

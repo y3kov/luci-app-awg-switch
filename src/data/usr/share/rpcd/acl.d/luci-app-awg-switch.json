@@ -1,0 +1,35 @@
+{
+    "luci-app-awg-switch": {
+        "description": "Grant full access to AmneziaWG Switch Pro",
+        "read": {
+            "ubus": {
+                "file": [ "read", "exec" ]
+            },
+            "file": {
+                "/proc/net/arp": [ "read" ],
+                "/tmp/dhcp.leases": [ "read" ],
+                "/tmp/awg_install.*": [ "read" ],
+                "/tmp/*": [ "read" ],
+                "/etc/awgswitch/*": [ "read" ],
+                "/etc/awgswitch/current.conf": [ "read" ],
+                "/usr/libexec/awgswitch/ctl.sh": [ "exec" ]
+            },
+            "uci": [ "network", "dhcp", "firewall" ]
+        },
+        "write": {
+            "ubus": {
+                "file": [ "write", "exec" ]
+            },
+            "file": {
+                "/tmp/*": [ "write" ],
+                "/tmp/awg_upload.b64": [ "write" ],
+                "/etc/awgswitch/*": [ "write" ],
+                "/etc/awgswitch/current.conf": [ "write" ],
+                "/usr/libexec/awgswitch/ctl.sh": [ "exec" ],
+                "/etc/init.d/network": [ "exec" ],
+                "/etc/init.d/dnsmasq": [ "exec" ]
+            },
+            "uci": [ "network", "firewall", "dhcp" ]
+        }
+    }
+}
