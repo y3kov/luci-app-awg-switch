@@ -41,6 +41,8 @@ define Package/luci-app-awg-switch/install
 	$(INSTALL_DATA) ./src/data/usr/share/rpcd/acl.d/*.json $(1)/usr/share/rpcd/acl.d/
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/awgswitch
 	$(INSTALL_DATA) ./src/data/www/luci-static/resources/view/awgswitch/*.js $(1)/www/luci-static/resources/view/awgswitch/
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/protocol
+	$(INSTALL_DATA) ./src/data/www/luci-static/resources/protocol/*.js $(1)/www/luci-static/resources/protocol/
 endef
 
 $(eval $(call BuildPackage,luci-app-awg-switch))

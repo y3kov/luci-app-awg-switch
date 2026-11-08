@@ -263,6 +263,8 @@ return view.extend({
                 E('h3', {}, '3. Диагностика: IP, DNS и проверка доступности сервисов (Anthropic, OpenAI, YouTube)'),
                 E('div', { 'class': 'cbi-section-node', 'style': 'padding:12px;' }, [
                     E('div', { 'style': 'display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;' }, [
+                        E('button', { 'class': 'btn cbi-button cbi-button-reset', 'click': ui.createHandlerFn(self, 'handleRunTest', 'diag', '') },
+                            '🩺 Полная диагностика туннеля (Debug)'),
                         E('button', { 'class': 'btn cbi-button cbi-button-apply', 'click': ui.createHandlerFn(self, 'handleRunTest', 'ipinfo', '') },
                             '🌐 Сравнить IP / Гео / ASN (WAN vs VPN) + DNS'),
                         E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(self, 'handleRunTest', 'anthropic', '') },

@@ -11,6 +11,16 @@ get_val() {
     grep -i "^[[:space:]]*$1[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n'
 }
 
+get_wg_cmd() {
+    if command -v awg >/dev/null 2>&1 || [ -x /usr/bin/awg ]; then
+        echo "awg"
+    elif command -v amneziawg >/dev/null 2>&1 || [ -x /usr/bin/amneziawg ]; then
+        echo "amneziawg"
+    else
+        echo "awg"
+    fi
+}
+
 clean_awg_uci() {
     # Удаляем все правила policy routing с lookup 100
     while true; do
@@ -18,6 +28,7 @@ clean_awg_uci() {
         [ -z "$RULE_ID" ] && break
         uci -q delete network.$RULE_ID
     done
+    uci -q delete network.awg_self
     uci -q delete network.awg_local_192
     uci -q delete network.awg_local_10
     uci -q delete network.awg_local_172
@@ -97,8 +108,11 @@ case "$ACTION" in
         LUCI_PKG_NAME="luci-proto-amneziawg"
 
         HAS_TOOLS=0
-        if command -v awg >/dev/null 2>&1 || [ -x /usr/bin/awg ] || [ -x /bin/awg ] || opkg list-installed 2>/dev/null | grep -q "^amneziawg-tools "; then
+        if command -v awg >/dev/null 2>&1 || [ -x /usr/bin/awg ] || [ -x /bin/awg ] || \
+           command -v amneziawg >/dev/null 2>&1 || [ -x /usr/bin/amneziawg ] || \
+           opkg list-installed 2>/dev/null | grep -q "^amneziawg-tools "; then
             HAS_TOOLS=1
+            [ ! -e /usr/bin/awg ] && [ -x /usr/bin/amneziawg ] && ln -sf /usr/bin/amneziawg /usr/bin/awg 2>/dev/null
         fi
 
         HAS_PROTO=0
@@ -144,7 +158,8 @@ case "$ACTION" in
 
         if [ "$HAS_TOOLS" -eq 1 ] && ip link show awg0 >/dev/null 2>&1; then
             WG_UP=1
-            DUMP=$(awg show awg0 dump 2>/dev/null | tail -n +2 | head -n 1)
+            WG_BIN=$(get_wg_cmd)
+            DUMP=$($WG_BIN show awg0 dump 2>/dev/null | tail -n +2 | head -n 1)
             if [ -n "$DUMP" ]; then
                 EP=$(echo "$DUMP" | awk '{print $3}')
                 HS_TS=$(echo "$DUMP" | awk '{print $5}')
@@ -437,22 +452,30 @@ case "$ACTION" in
         uci set network.awg0=interface
         uci set network.awg0.proto='amneziawg'
         uci set network.awg0.private_key="$PRIV_KEY"
-        uci set network.awg0.defaultroute='0'
+        uci set network.awg0.defaultroute='1'
         uci set network.awg0.ip4table='100'
         uci set network.awg0.disabled='0'
         [ -n "$MTU" ] && uci set network.awg0.mtu="$MTU"
 
         # Настройка IP адресов интерфейса
         RAW_ADDR=$(grep -i "^[[:space:]]*Address[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n')
-        case "$RAW_ADDR" in
-            */*) ;;
-            *) RAW_ADDR="${RAW_ADDR}/32" ;;
-        esac
         uci -q delete network.awg0.addresses
-        uci set network.awg0.addresses="$RAW_ADDR"
-        uci add_list network.awg0.addresses="$RAW_ADDR"
+        OLD_IFS="$IFS"
+        IFS=','
+        FIRST_IP=""
+        for ADDR in $RAW_ADDR; do
+            ADDR=$(echo "$ADDR" | tr -d ' ')
+            [ -z "$ADDR" ] && continue
+            case "$ADDR" in
+                */*) ;;
+                *) ADDR="${ADDR}/32" ;;
+            esac
+            [ -z "$FIRST_IP" ] && FIRST_IP="${ADDR%%/*}"
+            uci add_list network.awg0.addresses="$ADDR"
+        done
+        IFS="$OLD_IFS"
 
-        # Параметры маскировки AmneziaWG
+        # Параметры маскировки AmneziaWG (v1/v2)
         [ -n "$JC" ] && uci set network.awg0.awg_jc="$JC"
         [ -n "$JMIN" ] && uci set network.awg0.awg_jmin="$JMIN"
         [ -n "$JMAX" ] && uci set network.awg0.awg_jmax="$JMAX"
@@ -462,6 +485,14 @@ case "$ACTION" in
         [ -n "$H2" ] && uci set network.awg0.awg_h2="$H2"
         [ -n "$H3" ] && uci set network.awg0.awg_h3="$H3"
         [ -n "$H4" ] && uci set network.awg0.awg_h4="$H4"
+
+        # Поддержка расширенных параметров (AmneziaWG 3.1)
+        S3=$(get_val "S3")
+        S4=$(get_val "S4")
+        HPK=$(get_val "HeaderProtectionKey")
+        [ -n "$S3" ] && uci set network.awg0.awg_s3="$S3"
+        [ -n "$S4" ] && uci set network.awg0.awg_s4="$S4"
+        [ -n "$HPK" ] && uci set network.awg0.awg_header_protection_key="$HPK"
 
         # Настройка пира AmneziaWG
         while uci -q delete network.@amneziawg_awg0[0]; do :; done
@@ -475,15 +506,17 @@ case "$ACTION" in
         uci set network.$PEER.endpoint_port="$EP_PORT"
         uci set network.$PEER.persistent_keepalive='25'
         uci set network.$PEER.route_allowed_ips='1'
-        uci set network.$PEER.allowed_ips='0.0.0.0/0'
+        uci -q delete network.$PEER.allowed_ips
         uci add_list network.$PEER.allowed_ips='0.0.0.0/0'
 
         # DNS из конфига (если задан)
         RAW_DNS=$(grep -i "^[[:space:]]*DNS[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n')
         if [ -n "$RAW_DNS" ]; then
+            uci -q delete network.awg0.dns
             OLD_IFS="$IFS"
             IFS=','
             for D in $RAW_DNS; do
+                D=$(echo "$D" | tr -d ' ')
                 [ -n "$D" ] && uci add_list network.awg0.dns="$D"
             done
             IFS="$OLD_IFS"
@@ -507,6 +540,15 @@ case "$ACTION" in
             uci set network.awg_local_172.dest='172.16.0.0/12'
             uci set network.awg_local_172.lookup='main'
             uci set network.awg_local_172.priority='92'
+        fi
+
+        # Маршрутизация трафика самого роутера через туннель при обращении с IP адреса awg0 (приоритет 95)
+        if [ -n "$FIRST_IP" ]; then
+            uci -q delete network.awg_self
+            uci set network.awg_self=rule
+            uci set network.awg_self.src="$FIRST_IP/32"
+            uci set network.awg_self.lookup='100'
+            uci set network.awg_self.priority='95'
         fi
 
         uci commit network
@@ -622,6 +664,40 @@ case "$ACTION" in
         fi
 
         case "$ARG1" in
+            diag)
+                WG_BIN=$(get_wg_cmd)
+                echo "=========================================================="
+                echo "=== [1/6] Сетевой интерфейс awg0 и IP-адреса ==="
+                echo "=========================================================="
+                ip addr show awg0 2>&1 || echo "Интерфейс awg0 не поднят"
+                echo ""
+                echo "=========================================================="
+                echo "=== [2/6] Параметры AmneziaWG в ядре ($WG_BIN show) ==="
+                echo "=========================================================="
+                $WG_BIN show awg0 2>&1 || echo "Команда $WG_BIN show вернула ошибку"
+                echo ""
+                echo "=========================================================="
+                echo "=== [3/6] Политики маршрутизации устройств (ip rule) ==="
+                echo "=========================================================="
+                ip rule show
+                echo ""
+                echo "=========================================================="
+                echo "=== [4/6] Таблица маршрутизации VPN (таблица 100) ==="
+                echo "=========================================================="
+                ip route show table 100
+                echo ""
+                echo "=========================================================="
+                echo "=== [5/6] Статус интерфейса в netifd (ubus) ==="
+                echo "=========================================================="
+                ubus call network.interface.awg0 status 2>/dev/null | grep -E -A 10 '"up"|"route"|"inactive"' | head -n 30
+                echo ""
+                echo "=========================================================="
+                echo "=== [6/6] Журнал ядра и сетевого стека ==="
+                echo "=========================================================="
+                dmesg | grep -E -i "amnezia|awg" | tail -n 8
+                echo "--- netifd / amnezia logread ---"
+                logread | grep -E -i "amnezia|awg|netifd" | tail -n 12
+                ;;
             ipinfo)
                 echo "--- 1. Прямой выход провайдера (WAN) ---"
                 curl -4 -sS --max-time 5 https://ipinfo.io/json | grep -E '"ip"|"country"|"org"|"city"' | tr -d ',"'
