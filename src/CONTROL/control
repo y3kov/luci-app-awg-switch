@@ -1,5 +1,5 @@
 Package: luci-app-awg-switch
-Version: 2.1.0-1
+Version: 2.2.0-1
 Depends: libc, kmod-amneziawg, amneziawg-tools, luci-proto-amneziawg
 Section: luci
 Architecture: all

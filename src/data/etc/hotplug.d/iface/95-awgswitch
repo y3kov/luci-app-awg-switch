@@ -1,0 +1,4 @@
+#!/bin/sh
+[ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
+/usr/libexec/awgswitch/ctl.sh sync_vpn_devices >/dev/null 2>&1
+

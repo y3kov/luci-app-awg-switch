@@ -1,0 +1,3 @@
+#!/bin/sh
+/usr/libexec/awgswitch/ctl.sh sync_vpn_devices >/dev/null 2>&1
+

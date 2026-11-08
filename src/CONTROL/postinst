@@ -24,6 +24,14 @@ if [ -f /lib/netifd/proto/amneziawg.sh ] && ! grep -q "no_device=1" /lib/netifd/
 fi
 
 modprobe amneziawg >/dev/null 2>&1 || true
+chmod +x /etc/hotplug.d/iface/95-awgswitch 2>/dev/null || true
+chmod +x /etc/hotplug.d/firewall/95-awgswitch 2>/dev/null || true
+if uci -q get network.awg0 >/dev/null; then
+    /sbin/ifup awg0 >/dev/null 2>&1 || true
+    ip route replace default dev awg0 table 100 2>/dev/null || true
+fi
+/etc/init.d/firewall reload >/dev/null 2>&1 || true
+/usr/libexec/awgswitch/ctl.sh sync_vpn_devices >/dev/null 2>&1 || true
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
 /etc/init.d/rpcd restart >/dev/null 2>&1
 exit 0

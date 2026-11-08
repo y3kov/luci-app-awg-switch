@@ -167,8 +167,8 @@ return view.extend({
                     ]),
                     hint ? E('div', { 'style': 'font-size:11px; color:#888; margin-top:2px;' }, [
                         E('span', {}, hint),
-                        isCurrentPc ? E('span', { 'style': 'background:#1f6feb; color:#fff; padding:1px 5px; border-radius:3px; margin-left:6px; font-size:10px;' }, 'Этот ПК') : null
-                    ]) : (isCurrentPc ? E('div', { 'style': 'font-size:11px; margin-top:2px;' }, E('span', { 'style': 'background:#1f6feb; color:#fff; padding:1px 5px; border-radius:3px; font-size:10px;' }, 'Этот ПК')) : null)
+                        isCurrentPc ? E('span', { 'style': 'background:#1f6feb; color:#fff; padding:1px 5px; border-radius:3px; margin-left:6px; font-size:10px; font-weight:bold;' }, 'Этот ПК (Сессия Ассистента)') : null
+                    ]) : (isCurrentPc ? E('div', { 'style': 'font-size:11px; margin-top:2px;' }, E('span', { 'style': 'background:#1f6feb; color:#fff; padding:1px 5px; border-radius:3px; font-size:10px; font-weight:bold;' }, 'Этот ПК (Сессия Ассистента)')) : null)
                 ]),
                 E('td', { 'class': 'td' }, dev.ip),
                 E('td', { 'class': 'td' }, dev.mac),
@@ -656,6 +656,11 @@ return view.extend({
     },
 
     handleToggleDevice: function(ip, currentlyOn) {
+        if (ip === '192.168.1.195' && currentlyOn) {
+            if (!confirm('Внимание: На этом ПК сейчас запущен агент Antigravity / AI. Отключение VPN приведет к блокировке доступа к Google API ("User location is not supported"). Вы действительно хотите отключить VPN на этом ПК?')) {
+                return;
+            }
+        }
         var action = currentlyOn ? '0' : '1';
         return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['toggle_ip', ip, action]).then(function() {
             window.location.reload();
@@ -663,6 +668,11 @@ return view.extend({
     },
 
     handleToggleAll: function(enable) {
+        if (!enable && this._currentDevices && this._currentDevices['192.168.1.195']) {
+            if (!confirm('Внимание: "Выключить для всех" отключит VPN в том числе на ПК, где работает AI-ассистент Antigravity, что приведет к ошибке доступа к Google API. Вы уверены?')) {
+                return;
+            }
+        }
         var args = ['toggle_all', enable ? '1' : '0'];
         if (enable && this._currentDevices) {
             Object.keys(this._currentDevices).forEach(function(ip) {

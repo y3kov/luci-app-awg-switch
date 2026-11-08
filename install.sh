@@ -86,14 +86,15 @@ install_dep "$LUCI_PKG" || true
 
 echo ""
 echo "=== 2. Установка плагина управления AmneziaWG Switch Pro ==="
-IPK_FILE="luci-app-awg-switch_2.0.0-1_all.ipk"
-REPO_RAW="https://raw.githubusercontent.com/Y3KOV/luci-app-awg-switch/main/${IPK_FILE}"
+IPK_FILE="luci-app-awg-switch_2.2.0-1_all.ipk"
+REPO_RAW="https://raw.githubusercontent.com/Y3KOV/luci-app-awg-switch/main/release/${IPK_FILE}"
 MIRROR_RAW="https://mirror.ghproxy.com/${REPO_RAW}"
+FALLBACK_RAW="https://raw.githubusercontent.com/Y3KOV/luci-app-awg-switch/main/${IPK_FILE}"
 
 if [ -f "/tmp/$IPK_FILE" ]; then
     echo "[*] Найден локальный пакет /tmp/$IPK_FILE, выполняем установку..."
     opkg install --force-overwrite "/tmp/$IPK_FILE"
-elif download "$REPO_RAW" "$DL_DIR/$IPK_FILE" || download "$MIRROR_RAW" "$DL_DIR/$IPK_FILE"; then
+elif download "$REPO_RAW" "$DL_DIR/$IPK_FILE" || download "$MIRROR_RAW" "$DL_DIR/$IPK_FILE" || download "$FALLBACK_RAW" "$DL_DIR/$IPK_FILE"; then
     echo "[*] Пакет плагина скачан, установка..."
     opkg install --force-overwrite "$DL_DIR/$IPK_FILE"
 else

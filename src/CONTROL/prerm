@@ -1,12 +1,5 @@
 #!/bin/sh
 [ "${IPKG_INSTROOT}" != "" ] && exit 0
 
-/sbin/ifdown awg0 2>/dev/null
-if [ -f /etc/awgswitch/backup/network.orig ]; then
-    cp /etc/awgswitch/backup/network.orig /etc/config/network
-    cp /etc/awgswitch/backup/firewall.orig /etc/config/firewall
-    /etc/init.d/network reload >/dev/null 2>&1
-    /etc/init.d/firewall reload >/dev/null 2>&1
-fi
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
 exit 0

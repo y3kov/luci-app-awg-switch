@@ -33,10 +33,8 @@ get_wg_cmd() {
 
 clean_awg_uci() {
     # Удаляем все правила policy routing с lookup 100
-    while true; do
-        RULE_ID=$(uci show network 2>/dev/null | grep "\.lookup='100'" | head -n 1 | cut -d'.' -f2)
-        [ -z "$RULE_ID" ] && break
-        uci -q delete network.$RULE_ID
+    for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
+        uci -q delete network.$R
     done
     uci -q delete network.awg_route100
     uci -q delete network.awg_self
@@ -60,6 +58,20 @@ clean_awg_uci() {
 
     ip rule flush table 100 2>/dev/null
     ip route flush table 100 2>/dev/null
+    nft flush set inet fw4 awg_vpn_devices 2>/dev/null || true
+}
+
+sync_vpn_devices() {
+    # Синхронизация активных VPN-устройств с nftables set awg_vpn_devices
+    nft flush set inet fw4 awg_vpn_devices 2>/dev/null || true
+    for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
+        [ "$R" = "awg_self" ] && continue
+        [ "$(uci -q get network.$R.enabled)" = "0" ] && continue
+        SRC=$(uci -q get network.$R.src | cut -d'/' -f1)
+        if [ -n "$SRC" ] && [ "${SRC#100.}" = "$SRC" ]; then
+            nft add element inet fw4 awg_vpn_devices { "$SRC" } 2>/dev/null || true
+        fi
+    done
 }
 
 is_valid_archive() {
@@ -681,6 +693,12 @@ case "$ACTION" in
         sleep 2
         /sbin/ifup awg0 >/dev/null 2>&1
         ip route replace default dev awg0 table 100 2>/dev/null || true
+        sync_vpn_devices
+        echo "OK"
+        ;;
+
+    sync_vpn_devices)
+        sync_vpn_devices
         echo "OK"
         ;;
 
@@ -697,9 +715,11 @@ case "$ACTION" in
         uci commit network
         if [ "$ARG1" = "1" ]; then
             /sbin/ifdown awg0
+            nft flush set inet fw4 awg_vpn_devices 2>/dev/null || true
         else
             /sbin/ifup awg0
             ip route replace default dev awg0 table 100 2>/dev/null || true
+            sync_vpn_devices
         fi
         /etc/init.d/network reload
         echo "OK"
@@ -708,81 +728,72 @@ case "$ACTION" in
     toggle_ip)
         IP="$ARG1"
         ENABLE="$ARG2"
-        while true; do
-            RULE_ID=""
-            for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
-                [ "$R" = "awg_self" ] && continue
-                SRC=$(uci -q get network.$R.src | cut -d'/' -f1)
-                if [ "$SRC" = "$IP" ]; then
-                    RULE_ID="$R"
-                    break
-                fi
-            done
-            [ -z "$RULE_ID" ] && break
-            uci -q delete network.$RULE_ID
+        RULE_NAME="awgrule_$(echo "$IP" | tr '.' '_')"
+
+        # 1. Удаляем именованную секцию
+        uci -q delete network.$RULE_NAME
+
+        # 2. Удаляем любые анонимные правила для этого IP
+        for R in $(uci show network 2>/dev/null | grep "\.src='${IP}/32'" | cut -d'.' -f2); do
+            uci -q delete network.$R
         done
 
+        # 3. Если включаем - создаем детерминированную именованную секцию
         if [ "$ENABLE" = "1" ]; then
-            SID=$(uci add network rule)
-            uci set network.$SID=rule
-            uci set network.$SID.in='lan'
-            uci set network.$SID.src="${IP}/32"
-            uci set network.$SID.lookup='100'
-            uci set network.$SID.priority='100'
-            uci set network.$SID.enabled='1'
-            uci set network.$SID.comment="awgswitch_${IP}"
+            uci set network.$RULE_NAME=rule
+            uci set network.$RULE_NAME.in='lan'
+            uci set network.$RULE_NAME.src="${IP}/32"
+            uci set network.$RULE_NAME.lookup='100'
+            uci set network.$RULE_NAME.priority='100'
+            uci set network.$RULE_NAME.enabled='1'
+            uci set network.$RULE_NAME.comment="awgswitch_${IP}"
         fi
         uci commit network
+
+        # 4. Всегда синхронизируем nftables set awg_vpn_devices с реальным состоянием UCI
+        sync_vpn_devices
+
+        # 5. Применяем правила маршрутизации ядра
         /etc/init.d/network reload >/dev/null 2>&1
         echo "OK"
         ;;
 
     toggle_all)
         ENABLE="$ARG1"
-        while true; do
-            RULE_ID=""
-            for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
-                [ "$R" = "awg_self" ] && continue
-                RULE_ID="$R"
-                break
-            done
-            [ -z "$RULE_ID" ] && break
-            uci -q delete network.$RULE_ID
+        for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
+            [ "$R" = "awg_self" ] && continue
+            uci -q delete network.$R
         done
 
         if [ "$ENABLE" = "1" ]; then
             shift
             for IP in "$@"; do
                 [ -z "$IP" ] && continue
-                SID=$(uci add network rule)
-                uci set network.$SID=rule
-                uci set network.$SID.in='lan'
-                uci set network.$SID.src="${IP}/32"
-                uci set network.$SID.lookup='100'
-                uci set network.$SID.priority='100'
-                uci set network.$SID.enabled='1'
-                uci set network.$SID.comment="awgswitch_${IP}"
+                RULE_NAME="awgrule_$(echo "$IP" | tr '.' '_')"
+                uci set network.$RULE_NAME=rule
+                uci set network.$RULE_NAME.in='lan'
+                uci set network.$RULE_NAME.src="${IP}/32"
+                uci set network.$RULE_NAME.lookup='100'
+                uci set network.$RULE_NAME.priority='100'
+                uci set network.$RULE_NAME.enabled='1'
+                uci set network.$RULE_NAME.comment="awgswitch_${IP}"
             done
         fi
         uci commit network
+        sync_vpn_devices
         /etc/init.d/network reload >/dev/null 2>&1
         echo "OK"
         ;;
 
     reset_rules)
         # Сброс всех правил переключения устройств (все идут напрямую)
-        while true; do
-            RULE_ID=""
-            for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
-                [ "$R" = "awg_self" ] && continue
-                RULE_ID="$R"
-                break
-            done
-            [ -z "$RULE_ID" ] && break
-            uci -q delete network.$RULE_ID
+        for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
+            [ "$R" = "awg_self" ] && continue
+            uci -q delete network.$R
         done
         uci commit network
-        /etc/init.d/network reload
+        sync_vpn_devices
+        /etc/init.d/network reload >/dev/null 2>&1
         echo "OK"
         ;;
 
@@ -887,20 +898,46 @@ case "$ACTION" in
                 nslookup anthropic.com 127.0.0.1 2>/dev/null | tail -n +3
                 ;;
             anthropic)
-                echo "--- Cloudflare / Anthropic trace через VPN (awg0) ---"
-                curl --interface awg0 -4 -sS --max-time 6 https://claude.ai/cdn-cgi/trace | grep -E 'ip=|loc=|colo=|tls=|http='
+                echo "--- Cloudflare / Anthropic trace через VPN (awg0, Хельсинки) ---"
+                CLAUDE_IP=$(curl --interface awg0 -sS "https://dns.google/resolve?name=claude.ai" 2>/dev/null | grep -o '"data":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+                [ -z "$CLAUDE_IP" ] && CLAUDE_IP=$(nslookup claude.ai 1.1.1.1 2>/dev/null | grep -E '^Address:[[:space:]]+[0-9]+\.[0-9]+' | tail -n 1 | sed -e 's/.*[[:space:]]//')
+                if [ -n "$CLAUDE_IP" ]; then
+                    curl --interface awg0 --resolve "claude.ai:443:$CLAUDE_IP" -4 -sS --max-time 6 https://claude.ai/cdn-cgi/trace | grep -E 'ip=|loc=|colo=|tls=|http='
+                else
+                    curl --interface awg0 -4 -sS --max-time 6 https://claude.ai/cdn-cgi/trace | grep -E 'ip=|loc=|colo=|tls=|http='
+                fi
                 echo ""
-                echo "--- HTTP-статус API Anthropic (api.anthropic.com) через VPN ---"
-                curl --interface awg0 -4 -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 6 https://api.anthropic.com
-                echo "--- Для сравнения: тот же запрос НАПРЯМУЮ (WAN) ---"
+                echo "--- HTTP-статус API Anthropic (api.anthropic.com) через VPN (awg0) ---"
+                API_IP=$(curl --interface awg0 -sS "https://dns.google/resolve?name=api.anthropic.com" 2>/dev/null | grep -o '"data":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+                [ -z "$API_IP" ] && API_IP=$(nslookup api.anthropic.com 1.1.1.1 2>/dev/null | grep -E '^Address:[[:space:]]+[0-9]+\.[0-9]+' | tail -n 1 | sed -e 's/.*[[:space:]]//')
+                if [ -n "$API_IP" ]; then
+                    curl --interface awg0 --resolve "api.anthropic.com:443:$API_IP" -4 -sS -o /dev/null -w "HTTP: %{http_code} (Сервер Anthropic ответил: API доступен) | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 6 https://api.anthropic.com
+                else
+                    curl --interface awg0 -4 -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 6 https://api.anthropic.com
+                fi
+                echo "--- Для сравнения: тот же запрос НАПРЯМУЮ (WAN через GeoHide/Zapret) ---"
                 curl -4 -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 6 https://api.anthropic.com
                 ;;
             openai)
-                echo "--- OpenAI (chatgpt.com) trace через VPN (awg0) ---"
-                curl --interface awg0 -4 -sS --max-time 6 https://chatgpt.com/cdn-cgi/trace | grep -E 'ip=|loc=|colo=|tls='
+                echo "--- OpenAI (chatgpt.com) trace через VPN (awg0, Хельсинки) ---"
+                CHATGPT_IP=$(curl --interface awg0 -sS "https://dns.google/resolve?name=chatgpt.com" 2>/dev/null | grep -o '"data":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+                [ -z "$CHATGPT_IP" ] && CHATGPT_IP=$(nslookup chatgpt.com 1.1.1.1 2>/dev/null | grep -E '^Address:[[:space:]]+[0-9]+\.[0-9]+' | tail -n 1 | sed -e 's/.*[[:space:]]//')
+                if [ -n "$CHATGPT_IP" ]; then
+                    curl --interface awg0 --resolve "chatgpt.com:443:$CHATGPT_IP" -4 -sS --max-time 6 https://chatgpt.com/cdn-cgi/trace | grep -E 'ip=|loc=|colo=|tls='
+                else
+                    curl --interface awg0 -4 -sS --max-time 6 https://chatgpt.com/cdn-cgi/trace | grep -E 'ip=|loc=|colo=|tls='
+                fi
                 echo ""
-                echo "--- API OpenAI (api.openai.com) HTTP Code через VPN ---"
-                curl --interface awg0 -4 -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 6 https://api.openai.com/v1/models
+                echo "--- API OpenAI (api.openai.com) HTTP Code через VPN (awg0) ---"
+                OPENAI_API_IP=$(curl --interface awg0 -sS "https://dns.google/resolve?name=api.openai.com" 2>/dev/null | grep -o '"data":"[0-9.]*"' | head -n 1 | cut -d'"' -f4)
+                [ -z "$OPENAI_API_IP" ] && OPENAI_API_IP=$(nslookup api.openai.com 1.1.1.1 2>/dev/null | grep -E '^Address:[[:space:]]+[0-9]+\.[0-9]+' | tail -n 1 | sed -e 's/.*[[:space:]]//')
+                if [ -n "$OPENAI_API_IP" ]; then
+                    curl --interface awg0 --resolve "api.openai.com:443:$OPENAI_API_IP" -4 -sS -o /dev/null -w "HTTP: %{http_code} (Сервер OpenAI ответил: API доступен) | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 6 https://api.openai.com/v1/models
+                else
+                    curl --interface awg0 -4 -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 6 https://api.openai.com/v1/models
+                fi
+                echo "--- Для сравнения: тот же запрос НАПРЯМУЮ (WAN через GeoHide/Zapret) ---"
+                curl -4 -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 6 https://api.openai.com/v1/models
                 ;;
             youtube)
                 echo "--- Тест доступности YouTube & Google Video через VPN (awg0) ---"
@@ -910,12 +947,20 @@ case "$ACTION" in
             custom)
                 CLEAN_DOM=$(echo "$ARG2" | sed -e 's|^https\?://||' -e 's|/.*$||')
                 echo "--- Проверка домена: $CLEAN_DOM ---"
-                echo "[DNS Lookup]:"
+                echo "[1. DNS через роутер (GeoHide EU DoH)]:"
                 nslookup "$CLEAN_DOM" 127.0.0.1 2>/dev/null | tail -n +3
                 echo ""
-                echo "[Через VPN (awg0)]:"
-                curl --interface awg0 -4 -L -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 7 "https://$CLEAN_DOM"
-                echo "[Напрямую (WAN)]:"
+                echo "[2. DNS через публичный Cloudflare (1.1.1.1 - как видят VPN-клиенты)]:"
+                nslookup "$CLEAN_DOM" 1.1.1.1 2>/dev/null | tail -n +3
+                echo ""
+                CUSTOM_IP=$(nslookup "$CLEAN_DOM" 1.1.1.1 2>/dev/null | grep -E '^Address:[[:space:]]+[0-9]+\.[0-9]+' | tail -n 1 | sed -e 's/.*[[:space:]]//')
+                echo "[Через VPN (awg0 - чистый европейский маршрут)]:"
+                if [ -n "$CUSTOM_IP" ]; then
+                    curl --interface awg0 --resolve "$CLEAN_DOM:443:$CUSTOM_IP" -4 -L -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 7 "https://$CLEAN_DOM"
+                else
+                    curl --interface awg0 -4 -L -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 7 "https://$CLEAN_DOM"
+                fi
+                echo "[Напрямую (WAN - через провайдера / GeoHide)]:"
                 curl -4 -L -sS -o /dev/null -w "HTTP: %{http_code} | Время: %{time_total}s | IP: %{remote_ip}\n" --max-time 7 "https://$CLEAN_DOM"
                 ;;
         esac
