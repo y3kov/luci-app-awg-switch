@@ -103,14 +103,16 @@ return view.extend({
         rules.forEach(function(r) {
             // Пропускаем служебное правило самого роутера и локальные исключения
             if (r['.name'] === 'awg_self' || (r['.name'] && r['.name'].indexOf('awg_local') === 0)) return;
+            if (r.src && (r.src.indexOf('100.') === 0 || r.comment === 'awg_self')) return;
             if (r.lookup == '100' && r.src && r.enabled !== '0') {
                 var ipOnly = r.src.split('/')[0];
                 vpnEnabledMap[ipOnly] = r['.name'];
             }
         });
 
-        // 4. Добавляем устройства, для которых уже есть правила
+        // 4. Добавляем устройства, для которых уже есть правила (кроме внутренних адресов туннеля CGNAT)
         Object.keys(vpnEnabledMap).forEach(function(ip) {
+            if (ip.indexOf('100.') === 0) return;
             if (!devices[ip]) {
                 devices[ip] = { ip: ip, mac: '-', name: 'Вручную добавленный IP (' + ip + ')' };
             }

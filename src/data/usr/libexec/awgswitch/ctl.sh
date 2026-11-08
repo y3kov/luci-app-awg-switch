@@ -8,7 +8,12 @@ CONF="/etc/awgswitch/current.conf"
 BKP_DIR="/etc/awgswitch/backup"
 
 get_val() {
-    grep -i "^[[:space:]]*$1[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n'
+    grep -i "^[[:space:]]*$1[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' | tr -d ' \r\n'
+}
+
+get_val_raw() {
+    # Сохраняет пробелы внутри значения (критично для тегов I1..I5: '<b 0x...><r ...>')
+    grep -i "^[[:space:]]*$1[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' | tr -d '\r\n'
 }
 
 clean_num() {
@@ -448,6 +453,20 @@ case "$ACTION" in
         S4=$(get_val "S4")
         HPK=$(get_val "HeaderProtectionKey")
         CPA=$(get_val "ContentPaddingAddition")
+        RAT=$(get_val "RekeyAfterTime")
+        RT=$(get_val "RekeyTimeout")
+        REJ=$(get_val "RejectAfterTime")
+        KAT=$(get_val "KeepaliveTimeout")
+        MHA=$(get_val "MaxHandshakeAttempts")
+        RTRAIL=$(get_val "RandomTrailers")
+        DCOOK=$(get_val "DisableCookies")
+
+        I1=$(get_val_raw "I1")
+        I2=$(get_val_raw "I2")
+        I3=$(get_val_raw "I3")
+        I4=$(get_val_raw "I4")
+        I5=$(get_val_raw "I5")
+
         PUB_KEY=$(get_val "PublicKey")
         PSK=$(get_val "PresharedKey")
         MTU=$(get_val "MTU")
@@ -544,6 +563,20 @@ case "$ACTION" in
         [ -n "$S4" ] && uci set network.awg0.awg_s4="$S4"
         [ -n "$HPK" ] && uci set network.awg0.awg_header_protection_key="$HPK"
         [ -n "$CPA" ] && uci set network.awg0.awg_content_padding_addition="$CPA"
+        [ -n "$RAT" ] && uci set network.awg0.awg_rekey_after_time="$RAT"
+        [ -n "$RT" ] && uci set network.awg0.awg_rekey_timeout="$RT"
+        [ -n "$REJ" ] && uci set network.awg0.awg_reject_after_time="$REJ"
+        [ -n "$KAT" ] && uci set network.awg0.awg_keepalive_timeout="$KAT"
+        [ -n "$MHA" ] && uci set network.awg0.awg_max_handshake_attempts="$MHA"
+        [ -n "$RTRAIL" ] && uci set network.awg0.awg_random_trailers="$RTRAIL"
+        [ -n "$DCOOK" ] && uci set network.awg0.awg_disable_cookies="$DCOOK"
+
+        # Пакеты специальной сигнатуры (CPS: I1..I5)
+        [ -n "$I1" ] && uci set network.awg0.awg_i1="$I1"
+        [ -n "$I2" ] && uci set network.awg0.awg_i2="$I2"
+        [ -n "$I3" ] && uci set network.awg0.awg_i3="$I3"
+        [ -n "$I4" ] && uci set network.awg0.awg_i4="$I4"
+        [ -n "$I5" ] && uci set network.awg0.awg_i5="$I5"
 
         # Настройка пира AmneziaWG
         while uci -q delete network.@amneziawg_awg0[0]; do :; done
@@ -557,7 +590,7 @@ case "$ACTION" in
         uci set network.$PEER.endpoint_port="$EP_PORT"
 
         RAW_PKA=$(get_val "PersistentKeepalive")
-        PKA=$(clean_num "$RAW_PKA")
+        PKA=$(echo "$RAW_PKA" | tr -cd '0-9-')
         [ -z "$PKA" ] && PKA="25"
         uci set network.$PEER.persistent_keepalive="$PKA"
         uci set network.$PEER.route_allowed_ips='1'

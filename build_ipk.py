@@ -11,7 +11,7 @@ import time
 import tarfile
 
 PKG_NAME = "luci-app-awg-switch"
-PKG_VERSION = "2.0.0-1"
+PKG_VERSION = "2.1.0-1"
 OUT_IPK = f"{PKG_NAME}_{PKG_VERSION}_all.ipk"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
