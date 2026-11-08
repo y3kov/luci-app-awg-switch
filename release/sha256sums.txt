@@ -1,1 +1,1 @@
-381764bce01cb01290b683def1696bcfb2f8c84c4d184f4de3d2263e2d01d718  luci-app-awg-switch_2.2.0-1_all.ipk
+e567ee6055a89d50315386320b774b34601376de1c0c96dca2cfeef41fe48fd9  luci-app-awg-switch_2.2.0-1_all.ipk

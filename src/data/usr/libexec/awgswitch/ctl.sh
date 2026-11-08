@@ -811,7 +811,14 @@ case "$ACTION" in
             uci add_list dhcp.@dnsmasq[0].server='8.8.8.8'
         fi
         uci set dhcp.@dnsmasq[0].noresolv='1'
+        if [ "$(ubus call network.interface.wan6 status 2>/dev/null | jsonfilter -e '@.up')" != "true" ]; then
+            echo "[+] Провайдер не предоставляет IPv6: отключение IPv6 RA/DHCPv6 DNS утечек..."
+            uci set dhcp.lan.dhcpv6='disabled'
+            uci set dhcp.lan.ra='disabled'
+            uci set dhcp.@dnsmasq[0].filter_aaaa='1'
+        fi
         uci commit dhcp
+        /etc/init.d/odhcpd restart >/dev/null 2>&1 || true
         /etc/init.d/dnsmasq restart
         echo "[+] DNS успешно применены!"
         ;;

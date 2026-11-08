@@ -26,6 +26,17 @@ fi
 modprobe amneziawg >/dev/null 2>&1 || true
 chmod +x /etc/hotplug.d/iface/95-awgswitch 2>/dev/null || true
 chmod +x /etc/hotplug.d/firewall/95-awgswitch 2>/dev/null || true
+
+# Защита от IPv6 DNS утечек при отсутствии IPv6 интернета у провайдера
+if [ "$(ubus call network.interface.wan6 status 2>/dev/null | jsonfilter -e '@.up')" != "true" ]; then
+    uci -q set dhcp.lan.dhcpv6='disabled'
+    uci -q set dhcp.lan.ra='disabled'
+    uci -q set dhcp.@dnsmasq[0].filter_aaaa='1'
+    uci -q commit dhcp
+    /etc/init.d/odhcpd restart >/dev/null 2>&1 || true
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+fi
+
 if uci -q get network.awg0 >/dev/null; then
     /sbin/ifup awg0 >/dev/null 2>&1 || true
     ip route replace default dev awg0 table 100 2>/dev/null || true

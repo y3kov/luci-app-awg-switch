@@ -5,10 +5,14 @@ set awg_vpn_devices {
 
 chain awg_vpn_dstnat {
 	type nat hook prerouting priority dstnat - 5; policy accept;
-	iifname "br-lan" ip saddr @awg_vpn_devices ip daddr 192.168.0.0/16 udp dport 53 counter dnat ip to 1.1.1.1:53
-	iifname "br-lan" ip saddr @awg_vpn_devices ip daddr 192.168.0.0/16 tcp dport 53 counter dnat ip to 1.1.1.1:53
-	iifname "br-lan" ip saddr @awg_vpn_devices udp dport 53 accept
-	iifname "br-lan" ip saddr @awg_vpn_devices tcp dport 53 accept
+	iifname "br-lan" ip saddr @awg_vpn_devices udp dport 53 counter dnat ip to 1.1.1.1:53
+	iifname "br-lan" ip saddr @awg_vpn_devices tcp dport 53 counter dnat ip to 1.1.1.1:53
+}
+
+chain awg_vpn_input {
+	type filter hook input priority filter - 1; policy accept;
+	iifname "br-lan" meta nfproto ipv6 udp dport 53 counter reject with icmpv6 type port-unreachable
+	iifname "br-lan" meta nfproto ipv6 tcp dport 53 counter reject with tcp reset
 }
 
 chain awg_vpn_forward {
