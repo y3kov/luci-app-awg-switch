@@ -586,6 +586,7 @@ case "$ACTION" in
     master_toggle)
         uci set network.awg0.disabled="$ARG1"
         for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
+            [ "$R" = "awg_self" ] && continue
             if [ "$ARG1" = "1" ]; then
                 uci set network.$R.enabled='0'
             else
@@ -602,10 +603,79 @@ case "$ACTION" in
         echo "OK"
         ;;
 
+    toggle_ip)
+        IP="$ARG1"
+        ENABLE="$ARG2"
+        while true; do
+            RULE_ID=""
+            for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
+                [ "$R" = "awg_self" ] && continue
+                SRC=$(uci -q get network.$R.src | cut -d'/' -f1)
+                if [ "$SRC" = "$IP" ]; then
+                    RULE_ID="$R"
+                    break
+                fi
+            done
+            [ -z "$RULE_ID" ] && break
+            uci -q delete network.$RULE_ID
+        done
+
+        if [ "$ENABLE" = "1" ]; then
+            SID=$(uci add network rule)
+            uci set network.$SID=rule
+            uci set network.$SID.in='lan'
+            uci set network.$SID.src="${IP}/32"
+            uci set network.$SID.lookup='100'
+            uci set network.$SID.priority='100'
+            uci set network.$SID.enabled='1'
+            uci set network.$SID.comment="awgswitch_${IP}"
+        fi
+        uci commit network
+        /etc/init.d/network reload >/dev/null 2>&1
+        echo "OK"
+        ;;
+
+    toggle_all)
+        ENABLE="$ARG1"
+        while true; do
+            RULE_ID=""
+            for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
+                [ "$R" = "awg_self" ] && continue
+                RULE_ID="$R"
+                break
+            done
+            [ -z "$RULE_ID" ] && break
+            uci -q delete network.$RULE_ID
+        done
+
+        if [ "$ENABLE" = "1" ]; then
+            shift
+            for IP in "$@"; do
+                [ -z "$IP" ] && continue
+                SID=$(uci add network rule)
+                uci set network.$SID=rule
+                uci set network.$SID.in='lan'
+                uci set network.$SID.src="${IP}/32"
+                uci set network.$SID.lookup='100'
+                uci set network.$SID.priority='100'
+                uci set network.$SID.enabled='1'
+                uci set network.$SID.comment="awgswitch_${IP}"
+            done
+        fi
+        uci commit network
+        /etc/init.d/network reload >/dev/null 2>&1
+        echo "OK"
+        ;;
+
     reset_rules)
         # Сброс всех правил переключения устройств (все идут напрямую)
         while true; do
-            RULE_ID=$(uci show network 2>/dev/null | grep "\.lookup='100'" | head -n 1 | cut -d'.' -f2)
+            RULE_ID=""
+            for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
+                [ "$R" = "awg_self" ] && continue
+                RULE_ID="$R"
+                break
+            done
             [ -z "$RULE_ID" ] && break
             uci -q delete network.$RULE_ID
         done

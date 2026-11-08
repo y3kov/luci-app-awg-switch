@@ -93,6 +93,8 @@ return view.extend({
         var rules = uci.sections('network', 'rule');
         var vpnEnabledMap = {};
         rules.forEach(function(r) {
+            // Пропускаем служебное правило самого роутера и локальные исключения
+            if (r['.name'] === 'awg_self' || (r['.name'] && r['.name'].indexOf('awg_local') === 0)) return;
             if (r.lookup == '100' && r.src && r.enabled !== '0') {
                 var ipOnly = r.src.split('/')[0];
                 vpnEnabledMap[ipOnly] = r['.name'];
@@ -102,7 +104,7 @@ return view.extend({
         // 4. Добавляем устройства, для которых уже есть правила
         Object.keys(vpnEnabledMap).forEach(function(ip) {
             if (!devices[ip]) {
-                devices[ip] = { ip: ip, mac: '-', name: 'Пользовательский IP (' + ip + ')' };
+                devices[ip] = { ip: ip, mac: '-', name: 'Вручную добавленный IP (' + ip + ')' };
             }
         });
 
@@ -567,52 +569,20 @@ return view.extend({
     },
 
     handleToggleDevice: function(ip, currentlyOn) {
-        var rules = uci.sections('network', 'rule');
-        rules.forEach(function(r) {
-            if (r.lookup == '100' && (r.src === ip + '/32' || r.src === ip)) {
-                uci.remove('network', r['.name']);
-            }
-        });
-        if (!currentlyOn) {
-            var sid = uci.add('network', 'rule');
-            uci.set('network', sid, 'in', 'lan');
-            uci.set('network', sid, 'src', ip + '/32');
-            uci.set('network', sid, 'lookup', '100');
-            uci.set('network', sid, 'priority', '100');
-            uci.set('network', sid, 'enabled', '1');
-            uci.set('network', sid, 'comment', 'awgswitch_' + ip);
-        }
-        return uci.save().then(function() { return uci.apply(); }).then(function() {
-            return fs.exec('/etc/init.d/network', ['reload']);
-        }).then(function() {
+        var action = currentlyOn ? '0' : '1';
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['toggle_ip', ip, action]).then(function() {
             window.location.reload();
         });
     },
 
     handleToggleAll: function(enable) {
-        var rules = uci.sections('network', 'rule');
-        rules.forEach(function(r) {
-            if (r.lookup == '100') {
-                uci.remove('network', r['.name']);
-            }
-        });
-
+        var args = ['toggle_all', enable ? '1' : '0'];
         if (enable && this._currentDevices) {
-            var ips = Object.keys(this._currentDevices);
-            ips.forEach(function(ip) {
-                var sid = uci.add('network', 'rule');
-                uci.set('network', sid, 'in', 'lan');
-                uci.set('network', sid, 'src', ip + '/32');
-                uci.set('network', sid, 'lookup', '100');
-                uci.set('network', sid, 'priority', '100');
-                uci.set('network', sid, 'enabled', '1');
-                uci.set('network', sid, 'comment', 'awgswitch_' + ip);
+            Object.keys(this._currentDevices).forEach(function(ip) {
+                args.push(ip);
             });
         }
-
-        return uci.save().then(function() { return uci.apply(); }).then(function() {
-            return fs.exec('/etc/init.d/network', ['reload']);
-        }).then(function() {
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', args).then(function() {
             window.location.reload();
         });
     },
