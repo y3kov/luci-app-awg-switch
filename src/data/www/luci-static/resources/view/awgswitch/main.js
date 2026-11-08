@@ -17,7 +17,8 @@ return view.extend({
             fs.exec('/usr/libexec/awgswitch/ctl.sh', ['status']).then(function(r) {
                 try { return JSON.parse(r.stdout); } catch(e) { return {}; }
             }),
-            fs.read('/proc/net/arp').catch(function() { return ''; })
+            fs.read('/proc/net/arp').catch(function() { return ''; }),
+            fs.read('/etc/awgswitch/aliases.json').catch(function() { return '{}'; })
         ]);
     },
 
@@ -26,6 +27,8 @@ return view.extend({
         var currentConf = data[3] || '';
         var st = data[4] || {};
         var arpRaw = data[5] || '';
+        var aliases = {};
+        try { aliases = JSON.parse(data[6] || '{}'); } catch(e) {}
         var self = this;
 
         poll.add(function() {
@@ -120,11 +123,53 @@ return view.extend({
 
         this._currentDevices = devices;
 
+        var getVendorOrHint = function(mac, ip) {
+            if (!mac || mac === '-') return '';
+            var m = mac.toUpperCase();
+            var prefix = m.substring(0, 8);
+            if (prefix === 'C8:7F:54') return 'ASUSTeK (Этот ПК)';
+            if (prefix === '00:D8:61') return 'Micro-Star MSI (DESKTOP-S0JQ192)';
+            if (prefix === '3C:0B:4F') return 'Яндекс (Станция Макс)';
+            if (prefix === 'D4:D2:D6') return 'FN-Link (ТВ / Smart-устройство)';
+            if (prefix === 'B8:27:EB' || prefix === 'DC:A6:32' || prefix === 'E4:5F:01') return 'Raspberry Pi';
+            if (prefix.indexOf('BC:D0:74') === 0 || prefix.indexOf('64:90:C1') === 0) return 'Xiaomi';
+            if (prefix.indexOf('AC:C1:EE') === 0 || prefix.indexOf('50:01:D9') === 0) return 'Samsung';
+            if (prefix.indexOf('28:6D:CD') === 0 || prefix.indexOf('A4:83:E7') === 0) return 'Apple';
+            var c1 = m.charAt(1);
+            if (c1 === '2' || c1 === '6' || c1 === 'A' || c1 === 'E' || c1 === 'a' || c1 === 'e') {
+                return '📱 Смартфон / Планшет (Приватный MAC)';
+            }
+            return '';
+        };
+
         var rows = Object.keys(devices).sort().map(function(ip) {
             var dev = devices[ip];
+            if (aliases[dev.ip]) {
+                dev.name = aliases[dev.ip];
+            } else if (aliases[dev.mac]) {
+                dev.name = aliases[dev.mac];
+            }
+
+            var hint = getVendorOrHint(dev.mac, dev.ip);
+            var isCurrentPc = (dev.ip === '192.168.1.195');
             var isOn = !!vpnEnabledMap[ip];
+
             return E('tr', { 'class': 'tr' }, [
-                E('td', { 'class': 'td' }, E('strong', {}, dev.name)),
+                E('td', { 'class': 'td' }, [
+                    E('div', { 'style': 'display:flex; align-items:center; gap:6px;' }, [
+                        E('strong', {}, dev.name),
+                        E('button', {
+                            'class': 'btn cbi-button cbi-button-neutral',
+                            'style': 'padding: 1px 5px; font-size: 11px; line-height: 1.2;',
+                            'title': 'Переименовать устройство',
+                            'click': ui.createHandlerFn(self, 'handleRenameDevice', dev.ip, dev.name)
+                        }, '✏️')
+                    ]),
+                    hint ? E('div', { 'style': 'font-size:11px; color:#888; margin-top:2px;' }, [
+                        E('span', {}, hint),
+                        isCurrentPc ? E('span', { 'style': 'background:#1f6feb; color:#fff; padding:1px 5px; border-radius:3px; margin-left:6px; font-size:10px;' }, 'Этот ПК') : null
+                    ]) : (isCurrentPc ? E('div', { 'style': 'font-size:11px; margin-top:2px;' }, E('span', { 'style': 'background:#1f6feb; color:#fff; padding:1px 5px; border-radius:3px; font-size:10px;' }, 'Этот ПК')) : null)
+                ]),
                 E('td', { 'class': 'td' }, dev.ip),
                 E('td', { 'class': 'td' }, dev.mac),
                 E('td', { 'class': 'td' }, isOn
@@ -590,6 +635,23 @@ return view.extend({
                 if (out) out.textContent = (r.stdout || '') + (r.stderr ? '\n' + r.stderr : '');
                 ui.addNotification(null, E('p', 'Ошибка при применении конфигурации. См. вывод терминала.'), 'danger');
             }
+        });
+    },
+
+    handleRenameDevice: function(ip, currentName) {
+        var newName = window.prompt('Введите понятное имя для устройства (' + ip + '):', currentName || '');
+        if (newName === null) return;
+        return fs.read('/etc/awgswitch/aliases.json').catch(function() { return '{}'; }).then(function(raw) {
+            var d = {};
+            try { d = JSON.parse(raw || '{}'); } catch(e) {}
+            if (newName.trim() === '') {
+                delete d[ip];
+            } else {
+                d[ip] = newName.trim();
+            }
+            return fs.write('/etc/awgswitch/aliases.json', JSON.stringify(d, null, 2) + '\n');
+        }).then(function() {
+            window.location.reload();
         });
     },
 
