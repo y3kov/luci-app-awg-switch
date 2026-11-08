@@ -44,3 +44,4 @@ define Package/luci-app-awg-switch/install
 endef
 
 $(eval $(call BuildPackage,luci-app-awg-switch))
+

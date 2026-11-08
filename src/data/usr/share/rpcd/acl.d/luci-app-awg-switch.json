@@ -27,7 +27,8 @@
                 "/etc/awgswitch/current.conf": [ "write" ],
                 "/usr/libexec/awgswitch/ctl.sh": [ "exec" ],
                 "/etc/init.d/network": [ "exec" ],
-                "/etc/init.d/dnsmasq": [ "exec" ]
+                "/etc/init.d/dnsmasq": [ "exec" ],
+                "/sbin/reboot": [ "exec" ]
             },
             "uci": [ "network", "firewall", "dhcp" ]
         }

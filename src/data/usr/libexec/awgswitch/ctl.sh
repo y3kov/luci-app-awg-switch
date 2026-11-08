@@ -94,12 +94,7 @@ case "$ACTION" in
         PKGARCH=$(ubus call system board 2>/dev/null | jsonfilter -e '@.release.arch')
         [ -z "$PKGARCH" ] && PKGARCH=$(opkg print-architecture 2>/dev/null | awk 'BEGIN {max=0} {if ($3 > max) {max = $3; arch = $2}} END {print arch}')
 
-        MAJOR_VER=$(echo "$VERSION" | cut -d '.' -f 1)
-        PATCH_VER=$(echo "$VERSION" | cut -d '.' -f 3)
         LUCI_PKG_NAME="luci-proto-amneziawg"
-        if [ "$MAJOR_VER" -eq 23 ] 2>/dev/null && [ "$PATCH_VER" -lt 6 ] 2>/dev/null; then
-            LUCI_PKG_NAME="luci-app-amneziawg"
-        fi
 
         HAS_TOOLS=0
         if command -v awg >/dev/null 2>&1 || [ -x /usr/bin/awg ] || [ -x /bin/awg ] || opkg list-installed 2>/dev/null | grep -q "^amneziawg-tools "; then
@@ -107,14 +102,19 @@ case "$ACTION" in
         fi
 
         HAS_PROTO=0
-        if [ -f /lib/netifd/proto/amneziawg.sh ] || opkg list-installed 2>/dev/null | grep -E -q "^(luci-proto-amneziawg|luci-app-amneziawg) "; then
+        if [ -f /lib/netifd/proto/amneziawg.sh ]; then
+            HAS_PROTO=1
+        elif opkg list-installed 2>/dev/null | grep -q "^luci-proto-amneziawg "; then
             HAS_PROTO=1
         fi
 
         HAS_KMOD=0
-        if [ -d /sys/module/amneziawg ] || ls /lib/modules/*/amneziawg.ko >/dev/null 2>&1 || opkg list-installed 2>/dev/null | grep -q "^kmod-amneziawg "; then
+        if [ -d /sys/module/amneziawg ]; then
             HAS_KMOD=1
-            [ ! -d /sys/module/amneziawg ] && modprobe amneziawg 2>/dev/null
+        elif ls /lib/modules/*/amneziawg.ko >/dev/null 2>&1 || opkg list-installed 2>/dev/null | grep -q "^kmod-amneziawg "; then
+            # Пытаемся подгрузить модуль ядра в память
+            modprobe amneziawg >/dev/null 2>&1 || insmod $(ls /lib/modules/*/amneziawg.ko 2>/dev/null | head -n 1) >/dev/null 2>&1 || true
+            [ -d /sys/module/amneziawg ] && HAS_KMOD=1
         fi
 
         HAS_CURL=0; command -v curl >/dev/null 2>&1 && HAS_CURL=1
@@ -257,12 +257,7 @@ case "$ACTION" in
         echo "[*] Платформа: $TARGET/$SUBTARGET"
         echo "[*] Архитектура пакетов: $PKGARCH"
 
-        MAJOR_VER=$(echo "$VERSION" | cut -d '.' -f 1)
-        PATCH_VER=$(echo "$VERSION" | cut -d '.' -f 3)
         LUCI_PKG_NAME="luci-proto-amneziawg"
-        if [ "$MAJOR_VER" -eq 23 ] 2>/dev/null && [ "$PATCH_VER" -lt 6 ] 2>/dev/null; then
-            LUCI_PKG_NAME="luci-app-amneziawg"
-        fi
 
         # 0. Проверяем локальные .ipk файлы в /tmp (если пользователь загрузил их вручную)
         LOCAL_IPKS=$(ls /tmp/amneziawg*.ipk /tmp/kmod-amneziawg*.ipk /tmp/luci-app-amneziawg*.ipk /tmp/luci-proto-amneziawg*.ipk 2>/dev/null)
@@ -338,7 +333,7 @@ case "$ACTION" in
         echo "=========================================================="
         echo "=== [4/5] Модуль интерфейса: $LUCI_PKG_NAME ==="
         echo "=========================================================="
-        if [ -f /lib/netifd/proto/amneziawg.sh ] || opkg list-installed 2>/dev/null | grep -E -q "^(luci-proto-amneziawg|luci-app-amneziawg) "; then
+        if [ -f /lib/netifd/proto/amneziawg.sh ] && ( opkg list-installed 2>/dev/null | grep -q "^luci-proto-amneziawg " || [ -f /www/luci-static/resources/protocol/amneziawg.js ] ); then
             echo "[✓] Протокол amneziawg уже зарегистрирован в системе."
         else
             PROTO_PKG="${LUCI_PKG_NAME}${PKG_POSTFIX}"
@@ -352,6 +347,7 @@ case "$ACTION" in
                     break
                 fi
             done
+            [ "$DOWNLOADED" -eq 0 ] && echo "[!] Прямое скачивание $PROTO_PKG не удалось."
         fi
 
         # Если amneziawg-tools все еще не встал, пробуем официальный скрипт amneziawg-install.sh
@@ -446,19 +442,15 @@ case "$ACTION" in
         uci set network.awg0.disabled='0'
         [ -n "$MTU" ] && uci set network.awg0.mtu="$MTU"
 
-        # Настройка IP адресов интерфейса (с добавлением маски /32 при отсутствии)
+        # Настройка IP адресов интерфейса
         RAW_ADDR=$(grep -i "^[[:space:]]*Address[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n')
-        OLD_IFS="$IFS"
-        IFS=','
-        for ADDR in $RAW_ADDR; do
-            [ -z "$ADDR" ] && continue
-            case "$ADDR" in
-                */*) ;;
-                *) ADDR="$ADDR/32" ;;
-            esac
-            uci add_list network.awg0.addresses="$ADDR"
-        done
-        IFS="$OLD_IFS"
+        case "$RAW_ADDR" in
+            */*) ;;
+            *) RAW_ADDR="${RAW_ADDR}/32" ;;
+        esac
+        uci -q delete network.awg0.addresses
+        uci set network.awg0.addresses="$RAW_ADDR"
+        uci add_list network.awg0.addresses="$RAW_ADDR"
 
         # Параметры маскировки AmneziaWG
         [ -n "$JC" ] && uci set network.awg0.awg_jc="$JC"
@@ -474,12 +466,16 @@ case "$ACTION" in
         # Настройка пира AmneziaWG
         while uci -q delete network.@amneziawg_awg0[0]; do :; done
         PEER=$(uci add network amneziawg_awg0)
+        uci set network.$PEER=amneziawg_awg0
+        uci set network.$PEER.name='awg0_client'
+        uci set network.$PEER.description='awg0_peer'
         uci set network.$PEER.public_key="$PUB_KEY"
         [ -n "$PSK" ] && uci set network.$PEER.preshared_key="$PSK"
         uci set network.$PEER.endpoint_host="$EP_HOST"
         uci set network.$PEER.endpoint_port="$EP_PORT"
         uci set network.$PEER.persistent_keepalive='25'
         uci set network.$PEER.route_allowed_ips='1'
+        uci set network.$PEER.allowed_ips='0.0.0.0/0'
         uci add_list network.$PEER.allowed_ips='0.0.0.0/0'
 
         # DNS из конфига (если задан)
@@ -530,10 +526,18 @@ case "$ACTION" in
             uci set firewall.fwd_lan_awg.src='lan'
             uci set firewall.fwd_lan_awg.dest='awg'
             uci commit firewall
-            /etc/init.d/firewall reload
+            /etc/init.d/firewall reload >/dev/null 2>&1
         fi
 
-        /sbin/ifup awg0
+        # Подгружаем модуль ядра (если еще не в памяти)
+        if [ ! -d /sys/module/amneziawg ]; then
+            modprobe amneziawg >/dev/null 2>&1 || insmod $(ls /lib/modules/*/amneziawg.ko 2>/dev/null | head -n 1) >/dev/null 2>&1 || true
+        fi
+
+        # Перезагружаем сетевой стек netifd
+        /etc/init.d/network reload >/dev/null 2>&1
+        sleep 2
+        /sbin/ifup awg0 >/dev/null 2>&1
         echo "OK"
         ;;
 

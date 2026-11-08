@@ -184,8 +184,8 @@ return view.extend({
                         var subtgt = st.subtarget || 'mt7621';
                         var pfix = '_v' + ver + '_' + arch + '_' + tgt + '_' + subtgt + '.ipk';
                         var toolsUrl = 'https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v' + ver + '/amneziawg-tools' + pfix;
-                        var luciPkg = (st.missing_pkgs && st.missing_pkgs.indexOf('luci-proto') !== -1) ? 'luci-proto-amneziawg' : 'luci-app-amneziawg';
-                        var luciUrl = 'https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v' + ver + '/' + luciPkg + pfix;
+                        var luciPkg = 'luci-proto-amneziawg';
+                        var luciUrl = 'https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v' + ver + '/luci-proto-amneziawg' + pfix;
 
                         return E('div', { 'style': 'margin-top:14px; padding:12px; background:#1e1e1e; border:1px solid #444; border-radius:6px; font-size:12px; line-height:1.6;' }, [
                             E('strong', { 'style': 'color:#e6a23c; font-size:13px;' }, '⚠️ Не удается скачать с GitHub автоматически (ошибка 504 / блокировка)?'),
@@ -326,7 +326,11 @@ return view.extend({
                         E('button', {
                             'class': 'btn cbi-button cbi-button-save',
                             'click': ui.createHandlerFn(self, 'handleBackupNow')
-                        }, '📸 Создать новую точку отката сети')
+                        }, '📸 Создать новую точку отката сети'),
+                        E('button', {
+                            'class': 'btn cbi-button cbi-button-reset',
+                            'click': ui.createHandlerFn(self, 'handleRebootRouter')
+                        }, '⚡ Перезагрузить роутер (reboot)')
                     ]),
 
                     E('details', { 'style': 'background:#222; border:1px solid #444; border-radius:6px; padding:10px;' }, [
@@ -507,6 +511,13 @@ return view.extend({
             }
         };
         reader.readAsArrayBuffer(file);
+    },
+
+    handleRebootRouter: function() {
+        if (!confirm('Перезагрузить роутер сейчас? После перезагрузки ядро OpenWrt активирует все новые модули AmneziaWG.')) return;
+        ui.addNotification(null, E('p', 'Роутер перезагружается. Подождите около 60 секунд, затем обновите страницу.'), 'info');
+        fs.exec('/sbin/reboot').catch(function() {});
+        setTimeout(function() { window.location.reload(); }, 50000);
     },
 
     handleMasterToggle: function(disableFlag) {
