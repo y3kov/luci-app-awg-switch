@@ -38,6 +38,7 @@ clean_awg_uci() {
         [ -z "$RULE_ID" ] && break
         uci -q delete network.$RULE_ID
     done
+    uci -q delete network.awg_route100
     uci -q delete network.awg_self
     uci -q delete network.awg_local_192
     uci -q delete network.awg_local_10
@@ -522,7 +523,8 @@ case "$ACTION" in
         uci set network.awg0=interface
         uci set network.awg0.proto='amneziawg'
         uci set network.awg0.private_key="$PRIV_KEY"
-        uci set network.awg0.defaultroute='1'
+        uci set network.awg0.defaultroute='0'
+        uci set network.awg0.peerdns='0'
         uci set network.awg0.ip4table='100'
         uci set network.awg0.disabled='0'
         [ -n "$MTU" ] && uci set network.awg0.mtu="$MTU"
@@ -609,18 +611,16 @@ case "$ACTION" in
             uci add_list network.$PEER.allowed_ips='0.0.0.0/0'
         fi
 
-        # DNS из конфига (если задан)
-        RAW_DNS=$(grep -i "^[[:space:]]*DNS[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' | tr -d ' \r\n')
-        if [ -n "$RAW_DNS" ]; then
-            uci -q delete network.awg0.dns
-            OLD_IFS="$IFS"
-            IFS=','
-            for D in $RAW_DNS; do
-                D=$(echo "$D" | tr -d ' ')
-                [ -n "$D" ] && uci add_list network.awg0.dns="$D"
-            done
-            IFS="$OLD_IFS"
-        fi
+        # DNS из конфига не инжектируем в интерфейс, чтобы не ломать локальный DoH/dnsmasq
+        uci -q delete network.awg0.dns
+
+        # Маршрут по умолчанию для таблицы маршрутизации 100
+        uci -q delete network.awg_route100
+        uci set network.awg_route100=route
+        uci set network.awg_route100.interface='awg0'
+        uci set network.awg_route100.target='0.0.0.0'
+        uci set network.awg_route100.netmask='0.0.0.0'
+        uci set network.awg_route100.table='100'
 
         # Исключение локальных сетей (LAN/NAS/Router) из VPN туннеля (priorities 90-92)
         if ! uci -q get network.awg_local_192 >/dev/null; then
@@ -680,6 +680,7 @@ case "$ACTION" in
         /etc/init.d/network reload >/dev/null 2>&1
         sleep 2
         /sbin/ifup awg0 >/dev/null 2>&1
+        ip route replace default dev awg0 table 100 2>/dev/null || true
         echo "OK"
         ;;
 
@@ -698,6 +699,7 @@ case "$ACTION" in
             /sbin/ifdown awg0
         else
             /sbin/ifup awg0
+            ip route replace default dev awg0 table 100 2>/dev/null || true
         fi
         /etc/init.d/network reload
         echo "OK"
@@ -786,15 +788,21 @@ case "$ACTION" in
 
     fix_dns)
         echo "=== Настройка безопасных DNS в dnsmasq ==="
-        echo "Настройка Cloudflare (1.1.1.1, 1.0.0.1) и Google (8.8.8.8) в dnsmasq..."
-        uci -q delete dhcp.@dnsmasq[0].server
-        uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
-        uci add_list dhcp.@dnsmasq[0].server='1.0.0.1'
-        uci add_list dhcp.@dnsmasq[0].server='8.8.8.8'
+        if ps | grep -v grep | grep -q https-dns-proxy; then
+            echo "[+] Обнаружен активный DoH (https-dns-proxy). Сохранение привязки dnsmasq к 127.0.0.1#5053..."
+            uci -q delete dhcp.@dnsmasq[0].server
+            uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5053'
+        else
+            echo "Настройка Cloudflare (1.1.1.1, 1.0.0.1) и Google (8.8.8.8) в dnsmasq..."
+            uci -q delete dhcp.@dnsmasq[0].server
+            uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
+            uci add_list dhcp.@dnsmasq[0].server='1.0.0.1'
+            uci add_list dhcp.@dnsmasq[0].server='8.8.8.8'
+        fi
         uci set dhcp.@dnsmasq[0].noresolv='1'
         uci commit dhcp
         /etc/init.d/dnsmasq restart
-        echo "[+] Безопасные DNS успешно применены! Блокировки DNS провайдера устранены."
+        echo "[+] DNS успешно применены!"
         ;;
 
     backup_now)

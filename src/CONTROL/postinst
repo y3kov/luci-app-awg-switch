@@ -18,7 +18,12 @@ elif [ ! -e /usr/bin/amneziawg ] && [ -x /usr/bin/awg ]; then
     ln -sf /usr/bin/awg /usr/bin/amneziawg
 fi
 
+# Патч netifd proto для виртуального интерфейса awg
+if [ -f /lib/netifd/proto/amneziawg.sh ] && ! grep -q "no_device=1" /lib/netifd/proto/amneziawg.sh; then
+    sed -i '/proto_amneziawg_init_config()/a \    no_device=1' /lib/netifd/proto/amneziawg.sh 2>/dev/null || true
+fi
+
 modprobe amneziawg >/dev/null 2>&1 || true
-rm -rf /tmp/luci-*
+rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
 /etc/init.d/rpcd restart >/dev/null 2>&1
 exit 0
