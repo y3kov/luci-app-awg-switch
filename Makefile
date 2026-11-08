@@ -33,6 +33,11 @@ define Build/Compile
 endef
 
 define Package/luci-app-awg-switch/install
+	$(INSTALL_DIR) $(1)/usr/bin
+	[ -f ./src/data/usr/bin/amneziawg ] && $(INSTALL_BIN) ./src/data/usr/bin/amneziawg $(1)/usr/bin/amneziawg || true
+	[ -f ./src/data/usr/bin/amneziawg_watchdog ] && $(INSTALL_BIN) ./src/data/usr/bin/amneziawg_watchdog $(1)/usr/bin/amneziawg_watchdog || true
+	$(INSTALL_DIR) $(1)/lib/netifd/proto
+	[ -f ./src/data/lib/netifd/proto/amneziawg.sh ] && $(INSTALL_BIN) ./src/data/lib/netifd/proto/amneziawg.sh $(1)/lib/netifd/proto/amneziawg.sh || true
 	$(INSTALL_DIR) $(1)/usr/libexec/awgswitch
 	$(INSTALL_BIN) ./src/data/usr/libexec/awgswitch/ctl.sh $(1)/usr/libexec/awgswitch/ctl.sh
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d

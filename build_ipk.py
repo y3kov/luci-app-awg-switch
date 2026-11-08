@@ -18,11 +18,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROL_DIR = os.path.join(BASE_DIR, "src", "CONTROL")
 DATA_DIR = os.path.join(BASE_DIR, "src", "data")
 
-def read_file_unix(path):
+def read_file_content(path):
     with open(path, "rb") as f:
         data = f.read()
-    # Конвертируем CRLF -> LF, чтобы при редактировании в Windows не ломались shell-скрипты на роутере
-    return data.replace(b"\r\n", b"\n")
+    # Конвертируем CRLF -> LF только для текстовых файлов и скриптов (не трогаем бинарные ELF и .ko)
+    ext = os.path.splitext(path)[1].lower()
+    fname = os.path.basename(path)
+    text_exts = ('.sh', '.js', '.json', '.txt', '.md', '.conf', '.orig')
+    text_names = ('postinst', 'prerm', 'control', 'timestamp')
+    if ext in text_exts or fname in text_names:
+        return data.replace(b"\r\n", b"\n")
+    return data
 
 def add_bytes_to_tar(tar, arcname, content_bytes, mode=0o644, is_dir=False):
     ti = tarfile.TarInfo(name=arcname)
@@ -41,7 +47,7 @@ def add_bytes_to_tar(tar, arcname, content_bytes, mode=0o644, is_dir=False):
         ti.size = len(content_bytes)
         tar.addfile(ti, io.BytesIO(content_bytes))
 
-def pack_directory(source_dir, executable_exts=(".sh", "postinst", "prerm")):
+def pack_directory(source_dir, executable_exts=(".sh", "postinst", "prerm", "amneziawg", "amneziawg_watchdog", "awg")):
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.USTAR_FORMAT) as tar:
         for root, dirs, files in os.walk(source_dir):
@@ -56,7 +62,7 @@ def pack_directory(source_dir, executable_exts=(".sh", "postinst", "prerm")):
                 arcname = f"./{rel_path}"
                 is_exec = fname.endswith(executable_exts) or fname in executable_exts
                 mode = 0o755 if is_exec else 0o644
-                add_bytes_to_tar(tar, arcname, read_file_unix(full_path), mode=mode)
+                add_bytes_to_tar(tar, arcname, read_file_content(full_path), mode=mode)
     return buf.getvalue()
 
 def main():

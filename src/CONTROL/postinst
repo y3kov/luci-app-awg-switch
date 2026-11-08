@@ -10,14 +10,18 @@ if [ ! -f /etc/awgswitch/backup/network.orig ]; then
 fi
 
 chmod +x /usr/libexec/awgswitch/ctl.sh
-[ -f /lib/netifd/proto/amneziawg.sh ] && chmod +x /lib/netifd/proto/amneziawg.sh
+chmod 755 /usr/bin/amneziawg 2>/dev/null || true
+chmod 755 /usr/bin/amneziawg_watchdog 2>/dev/null || true
+[ -f /lib/netifd/proto/amneziawg.sh ] && chmod 755 /lib/netifd/proto/amneziawg.sh
 
 # Симлинк awg -> amneziawg для совместимости утилит
-if [ ! -e /usr/bin/awg ] && [ -x /usr/bin/amneziawg ]; then
-    ln -sf /usr/bin/amneziawg /usr/bin/awg
-fi
+ln -sf /usr/bin/amneziawg /usr/bin/awg 2>/dev/null
 
-modprobe amneziawg >/dev/null 2>&1 || true
+# Подгрузка модуля ядра
+KVER=$(uname -r 2>/dev/null)
+if [ ! -d /sys/module/amneziawg ]; then
+    modprobe amneziawg >/dev/null 2>&1 || insmod "/lib/modules/$KVER/amneziawg.ko" >/dev/null 2>&1 || insmod /lib/modules/5.15.137/amneziawg.ko >/dev/null 2>&1 || true
+fi
 rm -rf /tmp/luci-*
 /etc/init.d/rpcd restart >/dev/null 2>&1
 exit 0

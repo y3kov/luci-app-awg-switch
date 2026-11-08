@@ -1,8 +1,10 @@
 Package: luci-app-awg-switch
 Version: 2.0.0-1
-Depends: libc
+Depends: libc, kmod-amneziawg
+Provides: amneziawg-tools, luci-proto-amneziawg
+Replaces: amneziawg-tools, luci-proto-amneziawg
 Section: luci
 Architecture: all
-Installed-Size: 20480
+Installed-Size: 180000
 Maintainer: Custom OpenWrt Builder
-Description: AmneziaWG Switch Pro for OpenWrt 23.05 (per-device routing, live monitor, backup/restore, auto-installer of missing modules, diagnostics)
+Description: All-in-One AmneziaWG Switch Pro for OpenWrt (bundled tools and LuCI protocol handler, per-device policy routing, real-time handshake/traffic monitor)
