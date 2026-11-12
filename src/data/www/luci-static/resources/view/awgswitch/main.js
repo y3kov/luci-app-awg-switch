@@ -76,9 +76,11 @@ return view.extend({
             }
         });
 
+        var staticIpMap = {};
         // 2. Статические хосты из DHCP
         uci.sections('dhcp', 'host', function(s) {
             if (s.ip) {
+                staticIpMap[s.ip] = true;
                 devices[s.ip] = {
                     ip: s.ip,
                     mac: s.mac ? (Array.isArray(s.mac) ? s.mac[0] : s.mac).toUpperCase() : '-',
@@ -113,6 +115,14 @@ return view.extend({
             }
         });
 
+        var directMap = {};
+        if (st.direct_ips) {
+            st.direct_ips.split(',').forEach(function(dip) {
+                var d = dip.trim();
+                if (d) directMap[d] = true;
+            });
+        }
+
         // 4. Добавляем устройства, для которых уже есть правила (кроме внутренних адресов туннеля CGNAT)
         Object.keys(vpnEnabledMap).forEach(function(ip) {
             if (ip.indexOf('100.') === 0) return;
@@ -120,8 +130,19 @@ return view.extend({
                 devices[ip] = { ip: ip, mac: '-', name: 'Вручную добавленный IP (' + ip + ')' };
             }
         });
+        Object.keys(directMap).forEach(function(ip) {
+            if (!devices[ip]) {
+                devices[ip] = { ip: ip, mac: '-', name: 'Вручную добавленный IP (' + ip + ')' };
+            }
+        });
 
         this._currentDevices = devices;
+
+        var isRandomMac = function(mac) {
+            if (!mac || mac === '-' || mac.length < 2) return false;
+            var c1 = mac.charAt(1).toUpperCase();
+            return (c1 === '2' || c1 === '6' || c1 === 'A' || c1 === 'E');
+        };
 
         var getVendorOrHint = function(mac, ip) {
             if (!mac || mac === '-') return '';
@@ -135,9 +156,8 @@ return view.extend({
             if (prefix.indexOf('BC:D0:74') === 0 || prefix.indexOf('64:90:C1') === 0) return 'Xiaomi';
             if (prefix.indexOf('AC:C1:EE') === 0 || prefix.indexOf('50:01:D9') === 0) return 'Samsung';
             if (prefix.indexOf('28:6D:CD') === 0 || prefix.indexOf('A4:83:E7') === 0) return 'Apple';
-            var c1 = m.charAt(1);
-            if (c1 === '2' || c1 === '6' || c1 === 'A' || c1 === 'E' || c1 === 'a' || c1 === 'e') {
-                return '📱 Смартфон / Планшет (Приватный MAC)';
+            if (isRandomMac(m)) {
+                return '📱 Смартфон / Планшет (Случайный MAC — IP может меняться)';
             }
             return '';
         };
@@ -152,18 +172,38 @@ return view.extend({
 
             var hint = getVendorOrHint(dev.mac, dev.ip);
             var isCurrentPc = (dev.ip === '192.168.1.195');
-            var isOn = !!vpnEnabledMap[ip];
+            var isStatic = !!staticIpMap[ip];
+            var mode = vpnEnabledMap[ip] ? 'vpn' : (directMap[ip] ? 'direct' : 'standard');
+
+            var modeBadge;
+            if (mode === 'vpn') {
+                modeBadge = E('span', { 'style': 'color:#2ea043; font-weight:bold;' }, '🚀 VPN (AmneziaWG)');
+            } else if (mode === 'direct') {
+                modeBadge = E('span', { 'style': 'color:#e6a23c; font-weight:bold;' }, '🌐 Без ничего (Чистый WAN)');
+            } else {
+                modeBadge = E('span', { 'style': 'color:#58a6ff; font-weight:bold;' }, '🛡 Zapret + GeoHide DoH');
+            }
+
+            var btnStyleBase = 'padding:4px 8px; font-size:12px;';
 
             return E('tr', { 'class': 'tr' }, [
                 E('td', { 'class': 'td' }, [
-                    E('div', { 'style': 'display:flex; align-items:center; gap:6px;' }, [
+                    E('div', { 'style': 'display:flex; align-items:center; gap:6px; flex-wrap:wrap;' }, [
                         E('strong', {}, dev.name),
                         E('button', {
                             'class': 'btn cbi-button cbi-button-neutral',
                             'style': 'padding: 1px 5px; font-size: 11px; line-height: 1.2;',
                             'title': 'Переименовать устройство',
                             'click': ui.createHandlerFn(self, 'handleRenameDevice', dev.ip, dev.name)
-                        }, '✏️')
+                        }, '✏️'),
+                        isStatic
+                            ? E('span', { 'style': 'background:#238636; color:#fff; padding:1px 5px; border-radius:3px; font-size:10px;', 'title': 'Закрепленный статический IP' }, '📌 Стат. IP')
+                            : (dev.mac && dev.mac !== '-' ? E('button', {
+                                'class': 'btn cbi-button cbi-button-neutral',
+                                'style': 'padding: 1px 5px; font-size: 10px; line-height: 1.2;',
+                                'title': 'Закрепить этот IP за MAC-адресом в DHCP',
+                                'click': ui.createHandlerFn(self, 'handlePinDevice', dev.ip, dev.mac, dev.name)
+                            }, '📌 Закрепить IP') : null)
                     ]),
                     hint ? E('div', { 'style': 'font-size:11px; color:#888; margin-top:2px;' }, [
                         E('span', {}, hint),
@@ -172,13 +212,24 @@ return view.extend({
                 ]),
                 E('td', { 'class': 'td' }, dev.ip),
                 E('td', { 'class': 'td' }, dev.mac),
-                E('td', { 'class': 'td' }, isOn
-                    ? E('span', { 'style': 'color:#2ea043; font-weight:bold;' }, '● В туннеле VPN')
-                    : E('span', { 'style': 'color:#888;' }, '○ Прямой интернет')),
-                E('td', { 'class': 'td' }, E('button', {
-                    'class': isOn ? 'btn cbi-button cbi-button-reset' : 'btn cbi-button cbi-button-apply',
-                    'click': ui.createHandlerFn(self, 'handleToggleDevice', ip, isOn)
-                }, isOn ? 'Выключить VPN' : 'Включить VPN'))
+                E('td', { 'class': 'td' }, modeBadge),
+                E('td', { 'class': 'td' }, E('div', { 'style': 'display:flex; gap:4px; flex-wrap:wrap;' }, [
+                    E('button', {
+                        'class': mode === 'vpn' ? 'btn cbi-button cbi-button-apply' : 'btn cbi-button cbi-button-neutral',
+                        'style': btnStyleBase + (mode === 'vpn' ? 'font-weight:bold;' : 'opacity:0.75;'),
+                        'click': ui.createHandlerFn(self, 'handleSetMode', ip, 'vpn', mode)
+                    }, '🚀 VPN'),
+                    E('button', {
+                        'class': mode === 'standard' ? 'btn cbi-button cbi-button-action' : 'btn cbi-button cbi-button-neutral',
+                        'style': btnStyleBase + (mode === 'standard' ? 'font-weight:bold;' : 'opacity:0.75;'),
+                        'click': ui.createHandlerFn(self, 'handleSetMode', ip, 'standard', mode)
+                    }, '🛡 Zapret + DoH'),
+                    E('button', {
+                        'class': mode === 'direct' ? 'btn cbi-button cbi-button-reset' : 'btn cbi-button cbi-button-neutral',
+                        'style': btnStyleBase + (mode === 'direct' ? 'font-weight:bold;' : 'opacity:0.75;'),
+                        'click': ui.createHandlerFn(self, 'handleSetMode', ip, 'direct', mode)
+                    }, '🌐 Без ничего')
+                ]))
             ]);
         });
 
@@ -225,7 +276,11 @@ return view.extend({
                         E('button', {
                             'class': isMasterOff ? 'btn cbi-button cbi-button-apply' : 'btn cbi-button cbi-button-reset',
                             'click': ui.createHandlerFn(self, 'handleMasterToggle', isMasterOff ? '0' : '1')
-                        }, isMasterOff ? '▶ Включить туннель AmneziaWG' : '⏸ Отключить туннель (все устройства напрямую)'),
+                        }, isMasterOff ? '▶ Включить туннель AmneziaWG' : '⏸ Отключить туннель (все устройства в обычный режим)'),
+                        E('button', {
+                            'class': 'btn cbi-button cbi-button-action',
+                            'click': ui.createHandlerFn(self, 'handleRestartTunnel')
+                        }, '🔄 Перезапустить awg0'),
                         !st.pkg_installed ? E('button', {
                             'id': 'awg_btn_install',
                             'class': 'btn cbi-button cbi-button-action',
@@ -234,7 +289,12 @@ return view.extend({
                         !st.pkg_installed ? E('button', {
                             'class': 'btn cbi-button cbi-button-save',
                             'click': ui.createHandlerFn(self, 'handleFixDns')
-                        }, '🛡 Применить безопасные DNS (Cloudflare 1.1.1.1)') : E('span')
+                        }, '🛡 Применить безопасные DNS (1.1.1.1)') : E('span')
+                    ]),
+                    E('div', { 'style': 'margin-top:10px; font-size:12px; color:#aaa; display:flex; gap:14px; flex-wrap:wrap;' }, [
+                        E('span', {}, '🌐 DoH (GeoHide): ' + (st.doh_active ? '✅ Активен' : '⚠️ Не запущен')),
+                        E('span', {}, '🛡 Zapret (DPI): ' + (st.zapret_active ? '✅ Активен' : '○ Не обнаружен')),
+                        E('span', {}, '📡 DNS провайдера (для режима «Без ничего»): ' + (st.isp_dns || '1.1.1.1'))
                     ]),
                     E('div', {
                         'id': 'awg_waiting_alert',
@@ -244,27 +304,33 @@ return view.extend({
                         E('p', { 'style': 'margin:6px 0;' },
                             'Пакеты отправляются, но сервер пока не ответил. Возможные причины:'),
                         E('ul', { 'style': 'margin:6px 0 6px 20px;' }, [
+                            E('li', {}, 'Сервер из вашего .conf файла недоступен или устарел (проверьте новый .conf от Amnezia).'),
                             E('li', {}, 'Конфиг активен на другом устройстве (телефоне или ПК). В WireGuard нельзя использовать одну сессию на двух устройствах одновременно.'),
-                            E('li', {}, 'Для конфигураций Amnezia Premium: если сервер настроен с HeaderProtectionKey и CPS (AmneziaWG 3.1), он отклоняет handshake без защиты заголовков.'),
                             E('li', {}, 'Провайдер или ТСПУ блокирует UDP-порт или адрес сервера.')
                         ])
                     ]),
                     !st.pkg_installed ? (function() {
-                        var ver = st.version || '23.05.2';
+                        var ver = st.version || '24.10.0';
                         var arch = st.arch || 'mipsel_24kc';
                         var tgt = st.target || 'ramips';
                         var subtgt = st.subtarget || 'mt7621';
                         var pfix = '_v' + ver + '_' + arch + '_' + tgt + '_' + subtgt + '.ipk';
-                        var toolsUrl = 'https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v' + ver + '/amneziawg-tools' + pfix;
+                        var base = 'https://github.com/2Grey/awg-openwrt/releases/download/v' + ver + '/';
+                        var kmodUrl = base + 'kmod-amneziawg' + pfix;
+                        var toolsUrl = base + 'amneziawg-tools' + pfix;
                         var luciPkg = 'luci-proto-amneziawg';
-                        var luciUrl = 'https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v' + ver + '/luci-proto-amneziawg' + pfix;
+                        var luciUrl = base + luciPkg + pfix;
 
                         return E('div', { 'style': 'margin-top:14px; padding:12px; background:#1e1e1e; border:1px solid #444; border-radius:6px; font-size:12px; line-height:1.6;' }, [
                             E('strong', { 'style': 'color:#e6a23c; font-size:13px;' }, '⚠️ Не удается скачать с GitHub автоматически (ошибка 504 / блокировка)?'),
                             E('p', { 'style': 'margin:6px 0;' }, [
-                                'Если провайдер блокирует GitHub релизы, скачайте необходимые пакеты прямо на ваш компьютер в один клик:'
+                                'Если провайдер блокирует GitHub релизы, скачайте необходимые пакеты AmneziaWG 3.1 прямо на ваш компьютер:'
                             ]),
                             E('ul', { 'style': 'margin:6px 0 10px 20px;' }, [
+                                E('li', {}, [
+                                    E('a', { 'href': kmodUrl, 'target': '_blank', 'class': 'cbi-button-link', 'style': 'font-weight:bold; color:#58a6ff;' },
+                                        '⬇ Скачать kmod-amneziawg' + pfix)
+                                ]),
                                 E('li', {}, [
                                     E('a', { 'href': toolsUrl, 'target': '_blank', 'class': 'cbi-button-link', 'style': 'font-weight:bold; color:#58a6ff;' },
                                         '⬇ Скачать amneziawg-tools' + pfix)
@@ -655,21 +721,42 @@ return view.extend({
         });
     },
 
-    handleToggleDevice: function(ip, currentlyOn) {
-        if (ip === '192.168.1.195' && currentlyOn) {
-            if (!confirm('Внимание: На этом ПК сейчас запущен агент Antigravity / AI. Отключение VPN приведет к блокировке доступа к Google API ("User location is not supported"). Вы действительно хотите отключить VPN на этом ПК?')) {
+    handleRestartTunnel: function() {
+        var out = document.getElementById('awg_test_output');
+        if (out) out.textContent = 'Перезапуск туннеля awg0 и синхронизация правил...';
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['restart_tunnel']).then(function() {
+            ui.addNotification(null, E('p', 'Туннель awg0 перезапущен!'), 'info');
+            setTimeout(function() { window.location.reload(); }, 1000);
+        });
+    },
+
+    handlePinDevice: function(ip, mac, name) {
+        if (!confirm('Закрепить постоянный IP ' + ip + ' за устройством «' + name + '» (' + mac + ') в настройках DHCP роутера?')) return;
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['pin_ip', ip, mac, name]).then(function() {
+            ui.addNotification(null, E('p', 'IP ' + ip + ' закреплен за MAC ' + mac + '!'), 'info');
+            setTimeout(function() { window.location.reload(); }, 800);
+        });
+    },
+
+    handleSetMode: function(ip, newMode, currentMode) {
+        if (newMode === currentMode) return;
+        if (ip === '192.168.1.195' && currentMode === 'vpn' && newMode !== 'vpn') {
+            if (!confirm('Внимание: На этом ПК может быть активна сессия AI-ассистента через VPN. Вы действительно хотите переключить этот ПК в режим "' + newMode + '"?')) {
                 return;
             }
         }
-        var action = currentlyOn ? '0' : '1';
-        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['toggle_ip', ip, action]).then(function() {
+        return fs.exec('/usr/libexec/awgswitch/ctl.sh', ['set_mode', ip, newMode]).then(function() {
             window.location.reload();
         });
     },
 
+    handleToggleDevice: function(ip, currentlyOn) {
+        return this.handleSetMode(ip, currentlyOn ? 'standard' : 'vpn', currentlyOn ? 'vpn' : 'standard');
+    },
+
     handleToggleAll: function(enable) {
         if (!enable && this._currentDevices && this._currentDevices['192.168.1.195']) {
-            if (!confirm('Внимание: "Выключить для всех" отключит VPN в том числе на ПК, где работает AI-ассистент Antigravity, что приведет к ошибке доступа к Google API. Вы уверены?')) {
+            if (!confirm('Внимание: "Выключить для всех" отключит VPN в том числе на ПК, где работает AI-ассистент Antigravity, что может прервать доступ. Вы уверены?')) {
                 return;
             }
         }
@@ -693,7 +780,7 @@ return view.extend({
             ui.addNotification(null, E('p', 'Введите корректный IPv4-адрес (например, 192.168.1.55)'), 'danger');
             return;
         }
-        return this.handleToggleDevice(ip, false);
+        return this.handleSetMode(ip, 'vpn', 'standard');
     },
 
     handleBackupNow: function() {

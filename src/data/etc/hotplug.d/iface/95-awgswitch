@@ -1,4 +1,17 @@
 #!/bin/sh
 [ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
+if [ "$INTERFACE" = "wan" ]; then
+	(
+		sleep 2
+		if [ "$(uci -q get network.awg0.disabled)" != "1" ] && uci -q get network.awg0 >/dev/null 2>&1; then
+			/sbin/ifdown awg0 >/dev/null 2>&1
+			sleep 1
+			/sbin/ifup awg0 >/dev/null 2>&1
+			ip route replace default dev awg0 table 100 2>/dev/null || true
+		fi
+		/etc/init.d/https-dns-proxy reload >/dev/null 2>&1 || true
+		/usr/libexec/awgswitch/ctl.sh sync_vpn_devices >/dev/null 2>&1
+	) &
+	exit 0
+fi
 /usr/libexec/awgswitch/ctl.sh sync_vpn_devices >/dev/null 2>&1
-

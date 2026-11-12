@@ -6,6 +6,7 @@ ARG2="$3"
 
 CONF="/etc/awgswitch/current.conf"
 BKP_DIR="/etc/awgswitch/backup"
+DIRECT_FILE="/etc/awgswitch/direct.list"
 
 get_val() {
     grep -i "^[[:space:]]*$1[[:space:]]*=" "$CONF" 2>/dev/null | head -n 1 | cut -d'=' -f2- | sed -e 's/[#;].*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' | tr -d ' \r\n'
@@ -59,10 +60,40 @@ clean_awg_uci() {
     ip rule flush table 100 2>/dev/null
     ip route flush table 100 2>/dev/null
     nft flush set inet fw4 awg_vpn_devices 2>/dev/null || true
+    nft flush set inet fw4 awg_direct_devices 2>/dev/null || true
+    rm -f "$DIRECT_FILE"
+    clean_zapret_bypass
+}
+
+get_isp_dns() {
+    local d
+    d=$(grep -h '^nameserver ' /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf.auto 2>/dev/null | awk '{print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -n 1)
+    [ -z "$d" ] && d="1.1.1.1"
+    echo "$d"
+}
+
+clean_zapret_bypass() {
+    local h
+    for ch in postnat prenat; do
+        for h in $(nft -a list chain inet zapret "$ch" 2>/dev/null | grep '0x00800000' | grep -o 'handle [0-9]*' | awk '{print $2}'); do
+            nft delete rule inet zapret "$ch" handle "$h" 2>/dev/null || true
+        done
+    done
+}
+
+sync_zapret_bypass() {
+    if nft list chain inet zapret postnat >/dev/null 2>&1; then
+        nft list chain inet zapret postnat 2>/dev/null | grep -q '0x00800000' || \
+            nft insert rule inet zapret postnat ct mark \& 0x00800000 != 0 return 2>/dev/null || true
+    fi
+    if nft list chain inet zapret prenat >/dev/null 2>&1; then
+        nft list chain inet zapret prenat 2>/dev/null | grep -q '0x00800000' || \
+            nft insert rule inet zapret prenat ct mark \& 0x00800000 != 0 return 2>/dev/null || true
+    fi
 }
 
 sync_vpn_devices() {
-    # Синхронизация активных VPN-устройств с nftables set awg_vpn_devices
+    # Синхронизация VPN-устройств и устройств "Без ничего" с nftables
     nft flush set inet fw4 awg_vpn_devices 2>/dev/null || true
     for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
         [ "$R" = "awg_self" ] && continue
@@ -72,6 +103,26 @@ sync_vpn_devices() {
             nft add element inet fw4 awg_vpn_devices { "$SRC" } 2>/dev/null || true
         fi
     done
+
+    nft flush set inet fw4 awg_direct_devices 2>/dev/null || true
+    if [ -f "$DIRECT_FILE" ]; then
+        while IFS= read -r DIP || [ -n "$DIP" ]; do
+            DIP=$(echo "$DIP" | tr -cd '0-9.')
+            [ -n "$DIP" ] && nft add element inet fw4 awg_direct_devices { "$DIP" } 2>/dev/null || true
+        done < "$DIRECT_FILE"
+    fi
+
+    # Обновляем нативный DNS провайдера для режима "Без ничего"
+    ISP_DNS=$(get_isp_dns)
+    if nft list chain inet fw4 awg_direct_dstnat >/dev/null 2>&1; then
+        nft flush chain inet fw4 awg_direct_dstnat 2>/dev/null || true
+        nft add rule inet fw4 awg_direct_dstnat iifname br-lan ip saddr @awg_direct_devices ip daddr 192.168.0.0/16 udp dport 53 counter dnat ip to "${ISP_DNS}:53" 2>/dev/null || true
+        nft add rule inet fw4 awg_direct_dstnat iifname br-lan ip saddr @awg_direct_devices ip daddr 192.168.0.0/16 tcp dport 53 counter dnat ip to "${ISP_DNS}:53" 2>/dev/null || true
+        nft add rule inet fw4 awg_direct_dstnat iifname br-lan ip saddr @awg_direct_devices udp dport 53 accept 2>/dev/null || true
+        nft add rule inet fw4 awg_direct_dstnat iifname br-lan ip saddr @awg_direct_devices tcp dport 53 accept 2>/dev/null || true
+    fi
+
+    sync_zapret_bypass
 }
 
 is_valid_archive() {
@@ -211,8 +262,16 @@ case "$ACTION" in
             fi
         fi
 
-        printf '{"pkg_installed":%d,"missing_pkgs":"%s","has_curl":%d,"if_exists":%d,"if_disabled":%d,"wg_up":%d,"endpoint":"%s","handshake":"%s","rx":"%s","tx":"%s","rx_bytes":%s,"tx_bytes":%s,"backup_time":"%s","version":"%s","target":"%s","subtarget":"%s","arch":"%s"}\n' \
-            "$PKG_OK" "$MISSING" "$HAS_CURL" "$IF_EXISTS" "$IF_DISABLED" "$WG_UP" "$ENDPOINT" "$HANDSHAKE" "$RX" "$TX" "${RX_B:-0}" "${TX_B:-0}" "$BKP_TIME" "$VERSION" "$TARGET" "$SUBTARGET" "$PKGARCH"
+        DOH_ACTIVE=0
+        ps | grep -v grep | grep -q https-dns-proxy && DOH_ACTIVE=1
+        ZAPRET_ACTIVE=0
+        nft list table inet zapret >/dev/null 2>&1 && ZAPRET_ACTIVE=1
+        ISP_DNS=$(get_isp_dns)
+        DIRECT_IPS=""
+        [ -f "$DIRECT_FILE" ] && DIRECT_IPS=$(tr '\n' ',' < "$DIRECT_FILE" | sed 's/,$//')
+
+        printf '{"pkg_installed":%d,"missing_pkgs":"%s","has_curl":%d,"if_exists":%d,"if_disabled":%d,"wg_up":%d,"endpoint":"%s","handshake":"%s","rx":"%s","tx":"%s","rx_bytes":%s,"tx_bytes":%s,"backup_time":"%s","version":"%s","target":"%s","subtarget":"%s","arch":"%s","doh_active":%d,"zapret_active":%d,"isp_dns":"%s","direct_ips":"%s"}\n' \
+            "$PKG_OK" "$MISSING" "$HAS_CURL" "$IF_EXISTS" "$IF_DISABLED" "$WG_UP" "$ENDPOINT" "$HANDSHAKE" "$RX" "$TX" "${RX_B:-0}" "${TX_B:-0}" "$BKP_TIME" "$VERSION" "$TARGET" "$SUBTARGET" "$PKGARCH" "$DOH_ACTIVE" "$ZAPRET_ACTIVE" "$ISP_DNS" "$DIRECT_IPS"
         ;;
 
     start_install)
@@ -326,7 +385,7 @@ case "$ACTION" in
         AWG_TMP="/tmp/awg_dl"
         mkdir -p "$AWG_TMP"
 
-        REPOS="https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v${VERSION}/ https://mirror.ghproxy.com/https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v${VERSION}/ https://github.com/2Grey/awg-openwrt/releases/download/v${VERSION}/"
+        REPOS="https://github.com/2Grey/awg-openwrt/releases/download/v${VERSION}/ https://mirror.ghproxy.com/https://github.com/2Grey/awg-openwrt/releases/download/v${VERSION}/ https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v${VERSION}/ https://mirror.ghproxy.com/https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v${VERSION}/"
         PKG_POSTFIX="_v${VERSION}_${PKGARCH}_${TARGET}_${SUBTARGET}.ipk"
 
         echo ""
@@ -412,6 +471,9 @@ case "$ACTION" in
         echo "=========================================================="
         echo "=== [5/5] Загрузка ядра и мягкая перезагрузка служб ==="
         echo "=========================================================="
+        if [ -f /lib/netifd/proto/amneziawg.sh ] && ! grep -q "no_device=1" /lib/netifd/proto/amneziawg.sh; then
+            sed -i '/proto_amneziawg_init_config/a \    no_device=1' /lib/netifd/proto/amneziawg.sh 2>/dev/null || true
+        fi
         modprobe amneziawg 2>/dev/null || true
         rm -rf /tmp/luci-*
         /etc/init.d/rpcd reload >/dev/null 2>&1
@@ -725,37 +787,86 @@ case "$ACTION" in
         echo "OK"
         ;;
 
-    toggle_ip)
+    set_mode)
         IP="$ARG1"
-        ENABLE="$ARG2"
+        MODE="$ARG2"
         RULE_NAME="awgrule_$(echo "$IP" | tr '.' '_')"
+        mkdir -p /etc/awgswitch
 
-        # 1. Удаляем именованную секцию
+        # 1. Снимаем старое правило VPN и старую запись прямого режима
         uci -q delete network.$RULE_NAME
-
-        # 2. Удаляем любые анонимные правила для этого IP
         for R in $(uci show network 2>/dev/null | grep "\.src='${IP}/32'" | cut -d'.' -f2); do
             uci -q delete network.$R
         done
-
-        # 3. Если включаем - создаем детерминированную именованную секцию
-        if [ "$ENABLE" = "1" ]; then
-            uci set network.$RULE_NAME=rule
-            uci set network.$RULE_NAME.in='lan'
-            uci set network.$RULE_NAME.src="${IP}/32"
-            uci set network.$RULE_NAME.lookup='100'
-            uci set network.$RULE_NAME.priority='100'
-            uci set network.$RULE_NAME.enabled='1'
-            uci set network.$RULE_NAME.comment="awgswitch_${IP}"
+        if [ -f "$DIRECT_FILE" ]; then
+            grep -v "^${IP}$" "$DIRECT_FILE" > "${DIRECT_FILE}.tmp" 2>/dev/null || true
+            mv "${DIRECT_FILE}.tmp" "$DIRECT_FILE"
         fi
+
+        # 2. Применяем выбранный режим: vpn | direct | standard
+        case "$MODE" in
+            vpn)
+                uci set network.$RULE_NAME=rule
+                uci set network.$RULE_NAME.in='lan'
+                uci set network.$RULE_NAME.src="${IP}/32"
+                uci set network.$RULE_NAME.lookup='100'
+                uci set network.$RULE_NAME.priority='100'
+                uci set network.$RULE_NAME.enabled='1'
+                uci set network.$RULE_NAME.comment="awgswitch_${IP}"
+                ;;
+            direct)
+                echo "$IP" >> "$DIRECT_FILE"
+                ;;
+        esac
+
         uci commit network
-
-        # 4. Всегда синхронизируем nftables set awg_vpn_devices с реальным состоянием UCI
         sync_vpn_devices
-
-        # 5. Применяем правила маршрутизации ядра
         /etc/init.d/network reload >/dev/null 2>&1
         echo "OK"
+        ;;
+
+    pin_ip)
+        IP="$ARG1"
+        MAC="$ARG2"
+        NAME="$ARG3"
+        [ -z "$IP" ] || [ -z "$MAC" ] || [ "$MAC" = "-" ] && { echo "Invalid IP/MAC"; exit 1; }
+        HOST_ID="awghost_$(echo "$IP" | tr '.' '_')"
+        uci -q delete dhcp.$HOST_ID
+        uci set dhcp.$HOST_ID=host
+        uci set dhcp.$HOST_ID.name="${NAME:-device}"
+        uci set dhcp.$HOST_ID.mac="$MAC"
+        uci set dhcp.$HOST_ID.ip="$IP"
+        uci set dhcp.$HOST_ID.leasetime='12h'
+        uci commit dhcp
+        /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+        echo "OK"
+        ;;
+
+    restart_tunnel)
+        /sbin/ifdown awg0 >/dev/null 2>&1 || true
+        sleep 1
+        /sbin/ifup awg0 >/dev/null 2>&1 || true
+        ip route replace default dev awg0 table 100 2>/dev/null || true
+        sync_vpn_devices
+        echo "OK"
+        ;;
+
+    cleanup_rules)
+        /sbin/ifdown awg0 >/dev/null 2>&1 || true
+        clean_awg_uci
+        /etc/init.d/network reload >/dev/null 2>&1 || true
+        /etc/init.d/firewall reload >/dev/null 2>&1 || true
+        echo "OK"
+        ;;
+
+    toggle_ip)
+        IP="$ARG1"
+        ENABLE="$ARG2"
+        if [ "$ENABLE" = "1" ]; then
+            "$0" set_mode "$IP" vpn
+        else
+            "$0" set_mode "$IP" standard
+        fi
         ;;
 
     toggle_all)
@@ -764,6 +875,7 @@ case "$ACTION" in
             [ "$R" = "awg_self" ] && continue
             uci -q delete network.$R
         done
+        rm -f "$DIRECT_FILE"
 
         if [ "$ENABLE" = "1" ]; then
             shift
@@ -786,11 +898,12 @@ case "$ACTION" in
         ;;
 
     reset_rules)
-        # Сброс всех правил переключения устройств (все идут напрямую)
+        # Сброс всех правил переключения устройств (все переходят в обычный режим Zapret+DoH)
         for R in $(uci show network 2>/dev/null | grep "\.lookup='100'" | cut -d'.' -f2); do
             [ "$R" = "awg_self" ] && continue
             uci -q delete network.$R
         done
+        rm -f "$DIRECT_FILE"
         uci commit network
         sync_vpn_devices
         /etc/init.d/network reload >/dev/null 2>&1
@@ -816,6 +929,11 @@ case "$ACTION" in
             uci set dhcp.lan.dhcpv6='disabled'
             uci set dhcp.lan.ra='disabled'
             uci set dhcp.@dnsmasq[0].filter_aaaa='1'
+            if uci -q get https-dns-proxy.config >/dev/null 2>&1; then
+                uci set https-dns-proxy.config.force_ip_family='4'
+                uci commit https-dns-proxy
+                /etc/init.d/https-dns-proxy reload >/dev/null 2>&1 || true
+            fi
         fi
         uci commit dhcp
         /etc/init.d/odhcpd restart >/dev/null 2>&1 || true
@@ -975,6 +1093,9 @@ case "$ACTION" in
 
     uninstall)
         /sbin/ifdown awg0 2>/dev/null
+        clean_zapret_bypass
+        rm -f "$DIRECT_FILE"
+        rm -f /etc/nftables.d/30-awgswitch.nft
         if [ -f "$BKP_DIR/network.orig" ]; then
             cp "$BKP_DIR/network.orig" /etc/config/network
             cp "$BKP_DIR/firewall.orig" /etc/config/firewall

@@ -11,7 +11,7 @@ import time
 import tarfile
 
 PKG_NAME = "luci-app-awg-switch"
-PKG_VERSION = "2.2.0-1"
+PKG_VERSION = "2.3.0-1"
 OUT_IPK = f"{PKG_NAME}_{PKG_VERSION}_all.ipk"
 
 import hashlib
@@ -28,7 +28,7 @@ def read_file_content(path):
     # Конвертируем CRLF -> LF только для текстовых файлов и скриптов (не трогаем бинарные ELF и .ko)
     ext = os.path.splitext(path)[1].lower()
     fname = os.path.basename(path)
-    text_exts = ('.sh', '.js', '.json', '.txt', '.md', '.conf', '.orig')
+    text_exts = ('.sh', '.js', '.json', '.txt', '.md', '.conf', '.orig', '.nft')
     text_names = ('postinst', 'prerm', 'control', 'timestamp')
     if ext in text_exts or fname in text_names:
         return data.replace(b"\r\n", b"\n")

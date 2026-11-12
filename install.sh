@@ -53,10 +53,10 @@ download() {
     return 1
 }
 
-# 2. Проверка и установка зависимостей AmneziaWG
+# 2. Проверка и установка зависимостей AmneziaWG (2Grey для поддержки AWG 3.1)
 POSTFIX="_v${VERSION}_${PKGARCH}_${TARGET}_${SUBTARGET}.ipk"
-BASE_URL="https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v${VERSION}/"
-MIRROR_URL="https://mirror.ghproxy.com/https://github.com/Slava-Shchipunov/awg-openwrt/releases/download/v${VERSION}/"
+BASE_URL="https://github.com/2Grey/awg-openwrt/releases/download/v${VERSION}/"
+MIRROR_URL="https://mirror.ghproxy.com/https://github.com/2Grey/awg-openwrt/releases/download/v${VERSION}/"
 
 install_dep() {
     PKG_NAME="$1"
@@ -86,7 +86,7 @@ install_dep "$LUCI_PKG" || true
 
 echo ""
 echo "=== 2. Установка плагина управления AmneziaWG Switch Pro ==="
-IPK_FILE="luci-app-awg-switch_2.2.0-1_all.ipk"
+IPK_FILE="luci-app-awg-switch_2.3.0-1_all.ipk"
 REPO_RAW="https://raw.githubusercontent.com/Y3KOV/luci-app-awg-switch/main/release/${IPK_FILE}"
 MIRROR_RAW="https://mirror.ghproxy.com/${REPO_RAW}"
 FALLBACK_RAW="https://raw.githubusercontent.com/Y3KOV/luci-app-awg-switch/main/${IPK_FILE}"

@@ -20,7 +20,7 @@ fi
 
 # Патч netifd proto для виртуального интерфейса awg
 if [ -f /lib/netifd/proto/amneziawg.sh ] && ! grep -q "no_device=1" /lib/netifd/proto/amneziawg.sh; then
-    sed -i '/proto_amneziawg_init_config()/a \    no_device=1' /lib/netifd/proto/amneziawg.sh 2>/dev/null || true
+    sed -i '/proto_amneziawg_init_config/a \    no_device=1' /lib/netifd/proto/amneziawg.sh 2>/dev/null || true
 fi
 
 modprobe amneziawg >/dev/null 2>&1 || true
@@ -33,6 +33,11 @@ if [ "$(ubus call network.interface.wan6 status 2>/dev/null | jsonfilter -e '@.u
     uci -q set dhcp.lan.ra='disabled'
     uci -q set dhcp.@dnsmasq[0].filter_aaaa='1'
     uci -q commit dhcp
+    if uci -q get https-dns-proxy.config >/dev/null 2>&1; then
+        uci -q set https-dns-proxy.config.force_ip_family='4'
+        uci -q commit https-dns-proxy
+        /etc/init.d/https-dns-proxy reload >/dev/null 2>&1 || true
+    fi
     /etc/init.d/odhcpd restart >/dev/null 2>&1 || true
     /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
 fi
